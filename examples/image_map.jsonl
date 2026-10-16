@@ -1,0 +1,2 @@
+{"benchmark": "core-bench", "task_id": "", "docker_image": "core-bench/agentos-core-bench"}
+{"benchmark": "swebench", "task_id": "django__django-11099", "docker_image": "swebench/sweb.eval.x86_64.django__django-11099"}

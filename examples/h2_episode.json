@@ -1,0 +1,14 @@
+{
+  "benchmark": "swebench",
+  "task_id": "django__django-11099",
+  "attempt": 0,
+  "mode": "replay",
+  "episode_id": "",
+  "source_episode": "src-episode-id",
+  "source_store": "/path/to/host/source_store",
+  "profile_digest": "",
+  "trajectory": "/path/to/trajectory.json",
+  "mini_executable": "python3 -m minisweagent",
+  "episode_timeout_seconds": 3600,
+  "extra_replay_args": []
+}
