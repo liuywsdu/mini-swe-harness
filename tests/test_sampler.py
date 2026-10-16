@@ -62,8 +62,13 @@ def _make_proc_tree(root: Path) -> Path:
     ios = {
         100: "read_bytes: 4096\nwrite_bytes: 8192\n",
         101: "read_bytes: 1024\nwrite_bytes: 2048\n",
+        200: "read_bytes: 0\nwrite_bytes: 0\n",
     }
-    smaps = {100: "Rss:  400 kB\nPss:  300 kB\n", 101: "Rss:  200 kB\nPss:  100 kB\n"}
+    smaps = {
+        100: "Rss:  400 kB\nPss:  300 kB\n",
+        101: "Rss:  200 kB\nPss:  100 kB\n",
+        200: "Rss: 3600 kB\nPss: 3200 kB\n",
+    }
     for pid, stat in stats.items():
         pid_dir = root / str(pid)
         pid_dir.mkdir()
