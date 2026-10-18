@@ -9,6 +9,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import shutil
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -284,8 +285,11 @@ class FakeVM:
     process = FakeProcess()
     virtiofsd_process = None
 
-    def __init__(self):
+    def __init__(self, config=None):
         self.lifecycle = VMLifecycle(vm_id="fake", vmm="firecracker")
+        shared = config.shared_mount if config is not None else None
+        self.host_root = Path(shared.host_dir) if shared is not None else None
+        self.guest_root = shared.guest_path if shared is not None else "/mnt/share"
 
     def create(self):
         self.lifecycle.mark("create_start")
@@ -296,6 +300,43 @@ class FakeVM:
 
     def destroy(self):
         self.lifecycle.mark("destroy_confirmed")
+
+    def _local(self, guest_path):
+        relative = str(guest_path).removeprefix(self.guest_root).lstrip("/")
+        return self.host_root / relative
+
+    @staticmethod
+    def _copy_file(source, destination):
+        source, destination = Path(source), Path(destination)
+        if source.resolve() == destination.resolve():
+            return
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+
+    def upload_file(self, local_path, guest_path, timeout=None):
+        self._copy_file(local_path, self._local(guest_path))
+
+    def download_file(self, guest_path, local_path, timeout=None):
+        self._copy_file(self._local(guest_path), local_path)
+
+    @staticmethod
+    def _copy_dir(source, destination):
+        source, destination = Path(source), Path(destination)
+        if source.resolve() == destination.resolve():
+            return
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.copytree(source, destination)
+
+    def upload_directory(self, local_dir, guest_dir, timeout=None):
+        self._copy_dir(local_dir, self._local(guest_dir))
+
+    def download_directory(self, guest_dir, local_dir, timeout=None):
+        self._copy_dir(self._local(guest_dir), local_dir)
+
+    def read_guest_file(self, guest_path, timeout=None):
+        path = self._local(guest_path)
+        return path.read_text() if path.is_file() else None
 
 
 def _vm_config(tmp_path: Path) -> VMConfig:
@@ -340,7 +381,7 @@ def test_run_episode_completed_flow(tmp_path: Path):
         image_map_path=image_map_path,
         harbor=FakeHarbor({"swebench/repo": ["v1"]}, {"swebench/repo:v1": "sha256:abc"}),
         exec_fn=execute,
-        vm_factory=lambda cfg, vid, keep: FakeVM(),
+        vm_factory=lambda cfg, vid, keep: FakeVM(cfg),
     )
 
     assert record["status"] == "completed", record
@@ -373,7 +414,7 @@ def test_run_episode_missing_mapping_errors_before_vm(tmp_path: Path):
             tmp_path / "run",
             image_map_path=image_map_path,
             harbor=FakeHarbor({}),
-            vm_factory=lambda cfg, vid, keep: FakeVM(),
+            vm_factory=lambda cfg, vid, keep: FakeVM(cfg),
         )
 
 
@@ -386,7 +427,7 @@ def test_run_episode_skipped_on_ambiguous_tags(tmp_path: Path):
         tmp_path / "run",
         image_map_path=image_map_path,
         harbor=FakeHarbor({"b/repo": ["v1", "v2"]}),
-        vm_factory=lambda cfg, vid, keep: FakeVM(),
+        vm_factory=lambda cfg, vid, keep: FakeVM(cfg),
     )
     assert record["status"] == "skipped"
     assert record["skip_reason"] == "ambiguous_tags"
@@ -421,7 +462,7 @@ def test_run_episode_failure_closes_anchor_window(tmp_path: Path):
         image_map_path=image_map_path,
         harbor=FakeHarbor({"b/repo": ["v1"]}),
         exec_fn=execute,
-        vm_factory=lambda cfg, vid, keep: FakeVM(),
+        vm_factory=lambda cfg, vid, keep: FakeVM(cfg),
     )
     assert record["status"] == "failed"
     assert "boom" in record["failure"]

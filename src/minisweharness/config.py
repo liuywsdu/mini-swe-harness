@@ -13,15 +13,26 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class SharedMountConfig:
-    """virtiofs 共享挂载（H0）；guest 内挂载后用于 episode 注入（H2 复用）。"""
+    """宿主机与 guest 的共享目录约定。
+
+    默认 ``ssh`` 后端通过 SCP 显式上传/下载，不要求 VMM 支持共享文件系统；
+    ``virtiofs`` 后端保留给实现了相应 API 的 VMM。
+    """
 
     host_dir: str
     """宿主机侧共享目录（harness 写、guest 读写）。"""
 
     guest_path: str = "/mnt/share"
+    backend: str = "ssh"
+    """共享目录传输后端：``ssh``（默认）或 ``virtiofs``。"""
+
     tag: str = "share"
     virtiofsd_executable: str = "virtiofsd"
     virtiofsd_args: list[str] = field(default_factory=lambda: ["-o", "cache=auto"])
+
+    def __post_init__(self) -> None:
+        if self.backend not in ("ssh", "virtiofs"):
+            raise ValueError("shared_mount.backend must be 'ssh' or 'virtiofs'")
 
 
 @dataclass(frozen=True)

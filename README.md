@@ -41,8 +41,12 @@ examples/image_map.jsonl
 
 ## H0：单 VM 冒烟
 
-创建 firecracker VM → virtiofs 共享挂载 → guest 内 hello-world（含共享挂载
+创建 firecracker VM → 建立 guest 目录 → guest 内 hello-world（含共享目录
 双向读写校验）→ 销毁，全程记录 host wall + monotonic 双时间戳。
+
+`shared_mount.backend` 默认是 `ssh`：通过 SCP 显式上传/下载文件和目录，
+不调用 Firecracker `/virtio-fs`，也不要求 virtiofsd。仅当 VMM 确实支持相应
+API 时才使用 `backend: "virtiofs"`。
 
 ```bash
 pip install -e .
@@ -61,12 +65,12 @@ mini-swe-harness smoke --config examples/h0_smoke.json --run-dir runs/h0-001
    （时间戳缺失时 `smoke` 命令非零退出）；
 2. `smoke.json` 中 `shared_mount.host_to_guest_ok` 与 `guest_to_host_ok` 均为 true。
 
-真机验收（需 Linux + /dev/kvm + tap 设备 + firecracker/virtiofsd + guest 内核与
-rootfs，SSH 可达）：
+真机验收（需 Linux + /dev/kvm + tap 设备 + firecracker + ssh/scp + guest 内核与
+rootfs，SSH 免密可达）：
 
 ```bash
 pytest tests -q
-mini-swe-harness smoke --config <真机配置>.json --run-dir runs/h0-accept -v
+mini-swe-harness -v smoke --config <真机配置>.json --run-dir runs/h0-accept
 ```
 
 ## H1：VMM 采样器
@@ -88,9 +92,9 @@ mini-swe-harness sample --pid <firecracker_pid> --output runs/ep1/vm_samples.jso
 
 ## H2：episode 注入 + 镜像预热
 
-单 task 全流程：备 VM + virtiofs 共享挂载（episode 目录下 `shared/`）→ 挂
-VMM 采样器 → guest 内镜像预热 → 注入源 store → guest 内 mini replay →
-导出/完整性校验 → 按 §6 布局落盘。
+单 task 全流程：备 VM + SSH 共享目录（episode 目录下 `shared/`）→ 挂
+VMM 采样器 → guest 内镜像预热 → SCP 注入源 store/override → guest 内 mini
+replay → SCP 下载 store/导出事件并做完整性校验 → 按 §6 布局落盘。
 
 ```bash
 mini-swe-harness run-episode \
@@ -114,11 +118,12 @@ mini-swe-harness run-episode \
 - **override 生成**：`image` 直写 Harbor 全路径，`cwd`/`timeout` 直传、
   `user: N` → `run_args: ["--user", "N"]`，`runtime: "bounded Docker"` 等未知
   字段丢弃（禁止透传 trace 环境 dict），内容落 `episode.json.image_override`。
-- **注入**：宿主机侧源 store `copytree` 进共享挂载，guest 内跑
+- **注入**：SSH 后端以 `scp -r` 上传源 store、以 `scp` 上传 override，guest 内跑
   `minisweagent run replay run --environment-config <override>`（mini 对 docker
   executor 强制 `--pull=never`，命中本地 Harbor 名镜像）。
 - **完整性**：`session_snapshot.final` 存在才算 episode 有效；
-  guest `export-events` 产物行数必须与 store 行数一致。
+  guest `export-events` 后通过 SCP 下载 store 与 `guest_events.jsonl`，导出
+  产物行数必须与下载后的 store 行数一致。
 - **锚点切窗**：`warmup_start/warmup_done` 与 `episode_start/episode_end` 为
   host 双时间戳，pull 流量落在 warm-up 窗口，不进 episode 测量窗口。
 
@@ -147,13 +152,17 @@ mini-swe-harness run-episode --manifest <真机 manifest>.json --config <真机 
 ## H3：时钟校准 + 双层 join
 
 episode 测量窗口内周期读 guest 心跳文件（mini `Heartbeat` 写
-`store/heartbeat.json`）并打 host 双时间戳，产出 `clock_sync.json`：
+`store/heartbeat.json`）并打 host 双时间戳；SSH 后端通过远端 `cat` 读取，
+virtiofs 后端直接读共享路径。产出 `clock_sync.json`：
 `{offset_seconds, drift_ppm?, probe_count}`（offset 取中位数，drift 为 offset
 对 host monotonic 的斜率 ×1e6）。随后把 `guest_events.jsonl` 的 guest wall
 按「guest wall − offset → host wall」映射到 host 时间线，与
 `vm_samples.jsonl` 在同一锚点窗口（`episode_start → episode_end`）内分别汇总，
 产出 `reconciliation.json`：`{cpu_ratio, mem_ratio, io_ratio, net_ratio, notes}`
 （guest 合计 / host 总量，均 ≤ 1 为预期）。
+
+注意：SSH 探针的读延迟高于本地共享文件读取，offset 取中位数可降低抖动影响；
+分析测量质量时应把 SSH 传输开销纳入说明，不能与 virtiofs 探针延迟混为一谈。
 
 由 `run-episode` 在导出/完整性校验通过后自动生成，无需单独命令。
 

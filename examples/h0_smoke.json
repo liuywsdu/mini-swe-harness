@@ -14,8 +14,7 @@
   "shared_mount": {
     "host_dir": "/path/to/shared/dir",
     "guest_path": "/mnt/share",
-    "tag": "share",
-    "virtiofsd_executable": "virtiofsd",
-    "virtiofsd_args": ["-o", "cache=auto"]
+    "backend": "ssh",
+    "tag": "share"
   }
 }

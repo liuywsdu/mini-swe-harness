@@ -64,6 +64,7 @@ def test_vm_config_from_json_roundtrip(tmp_path: Path):
     config = VMConfig.from_json(config_path)
     assert config.vcpu_count == 2  # 默认与 mini 对齐
     assert config.shared_mount is not None
+    assert config.shared_mount.backend == "ssh"
     assert config.shared_mount.tag == "share"
     assert config.shared_mount.guest_path == "/mnt/share"
 

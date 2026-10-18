@@ -4,11 +4,11 @@
 
 1. 起跑前：映射表覆盖校验（缺失/零 tag 报错；多 tag 标 skipped 不进 VM）；
    生成 override（image 直写 Harbor 全路径，字段白名单翻译）；
-2. 备 VM（H0 SingleVM + virtiofs 共享挂载 = episode 目录下 ``shared/``）；
+2. 备 VM（H0 SingleVM + SSH/SCP 共享目录 = episode 目录下 ``shared/``）；
 3. 挂 VMM 采样器（H1）→ ``vm_samples.jsonl``；
 4. 镜像预热（warm-up 阶段）：guest 内 ``docker pull <Harbor 全路径>``
    （override 名即 Harbor 名，无需 tag）并 inspect 验证；
-5. episode 注入：源 store 复制进共享挂载，override 落共享挂载，guest 内
+5. episode 注入：源 store/override 经 SCP 上传，guest 内
    ``minisweagent run replay run --environment-config <override>``（mini 对
    docker executor 强制 ``--pull=never``，命中本地 Harbor 名镜像）；
 6. 收尾校验：``session_snapshot.final`` 存在、导出 JSONL 行数与 store 一致；
@@ -230,6 +230,7 @@ def run_episode(
         sampler.start()
 
         guest_share = config.shared_mount.guest_path
+        ssh_transfer = config.shared_mount.backend == "ssh"
         store_guest = f"{guest_share}/store"
         output_guest = f"{guest_share}/trajectory.json"
         events_guest = f"{guest_share}/guest_events.jsonl"
@@ -242,14 +243,23 @@ def run_episode(
 
         # ---- 阶段 2：注入（源 store + override 进共享挂载）
         if manifest.source_store:
-            destination = shared_dir / "store"
-            if destination.exists():
-                shutil.rmtree(destination)
-            shutil.copytree(manifest.source_store, destination)
+            if ssh_transfer:
+                vm.upload_directory(manifest.source_store, store_guest, timeout=300)
+            else:
+                destination = shared_dir / "store"
+                if destination.exists():
+                    shutil.rmtree(destination)
+                shutil.copytree(manifest.source_store, destination)
         (shared_dir / "override.json").write_text(json.dumps(override, indent=2) + "\n")
+        if ssh_transfer:
+            vm.upload_file(shared_dir / "override.json", override_guest)
 
         # ---- 阶段 3：episode 测量窗口（replay）
-        probe = ClockProbe(shared_dir / "store" / "heartbeat.json")
+        heartbeat_guest = f"{store_guest}/heartbeat.json"
+        probe = ClockProbe(
+            heartbeat_guest if ssh_transfer else shared_dir / "store" / "heartbeat.json",
+            read_text_fn=(lambda: vm.read_guest_file(heartbeat_guest, timeout=2)) if ssh_transfer else None,
+        )
         probe.start()
         anchors.mark("episode_start")
         command = build_replay_command(
@@ -267,6 +277,9 @@ def run_episode(
 
         # ---- 阶段 4：导出 + 完整性校验
         execute(shlex.join(export_events_command(store_guest, episode_id, events_guest)), 120)
+        if ssh_transfer:
+            vm.download_directory(store_guest, shared_dir / "store", timeout=300)
+            vm.download_file(events_guest, shared_dir / "guest_events.jsonl")
         store = GuestStore(shared_dir / "store")
         store.exported_count(episode_id, shared_dir / "guest_events.jsonl")
         if not store.completed(episode_id):
@@ -364,6 +377,7 @@ def _episode_vm_config(vm_config: VMConfig, shared_dir: Path) -> VMConfig:
     mount = SharedMountConfig(
         host_dir=str(shared_dir),
         guest_path=shared.guest_path if shared else "/mnt/share",
+        backend=shared.backend if shared else "ssh",
         tag=shared.tag if shared else "share",
         virtiofsd_executable=shared.virtiofsd_executable if shared else "virtiofsd",
         virtiofsd_args=list(shared.virtiofsd_args) if shared else ["-o", "cache=auto"],

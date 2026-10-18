@@ -1,8 +1,8 @@
 """时钟探针：读 guest 心跳文件并打 host 时间戳，产出 clock_offset（§5.1 / §6）。
 
 mini 的 ``Heartbeat``（``utils/heartbeat.py``）周期性把 guest wall+monotonic
-写到 store 旁的 ``heartbeat.json``（原子替换）。harness 周期读该文件并打
-host 双时间戳：``offset_seconds = guest_wall − host_wall``；跨层对齐一律
+写到 store 旁的 ``heartbeat.json``（原子替换）。harness 周期从本地路径或
+SSH 远端读取并打 host 双时间戳：``offset_seconds = guest_wall − host_wall``；跨层对齐一律
 「guest wall − offset → host wall」。
 
 ``drift_ppm`` 是 offset 随 host monotonic 变化的斜率（guest 时钟相对 host 的
@@ -26,17 +26,29 @@ class ClockProbe:
     heartbeat_path: str | Path
     interval_seconds: float = 0.5
     clock: Callable[[], DualTimestamp] = now
+    read_text_fn: Callable[[], str | None] | None = None
+    """可选远端读取器（SSH 后端）；缺省仍从本地共享路径读取。"""
+
     _samples: list[dict] = field(default_factory=list)
     _stop: threading.Event = field(default_factory=threading.Event, init=False)
     _thread: threading.Thread | None = None
 
     def collect_once(self) -> dict | None:
-        path = Path(self.heartbeat_path)
-        if not path.is_file():
+        if self.read_text_fn is not None:
+            raw = self.read_text_fn()
+        else:
+            path = Path(self.heartbeat_path)
+            if not path.is_file():
+                return None
+            try:
+                raw = path.read_text()
+            except OSError:
+                return None
+        if raw is None:
             return None
         try:
-            payload = json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError):
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
             return None
         guest_wall = float(payload.get("wall_ts", 0.0))
         guest_monotonic = float(payload.get("monotonic_ts", 0.0))

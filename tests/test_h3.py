@@ -10,6 +10,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import shutil
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -196,6 +197,22 @@ def test_reconcile_nulls_when_host_missing():
     assert result["mem_ratio"] is None
 
 
+def test_clock_probe_reads_heartbeat_through_ssh_reader():
+    from minisweharness.timestamps import DualTimestamp
+
+    payload = json.dumps({"wall_ts": 101.0, "monotonic_ts": 5.0})
+    probe = ClockProbe(
+        "/mnt/share/store/heartbeat.json",
+        read_text_fn=lambda: payload,
+        clock=lambda: DualTimestamp(wall=100.0, monotonic=10.0),
+    )
+    sample = probe.collect_once()
+    assert sample is not None
+    assert sample["guest_wall"] == 101.0
+    assert sample["host_wall"] == 100.0
+    assert probe.calibrate()["offset_seconds"] == 1.0
+
+
 # ------------------------------------------------------------------ episode 集成
 
 
@@ -207,8 +224,11 @@ class FakeVM:
     process = FakeProcess()
     virtiofsd_process = None
 
-    def __init__(self):
+    def __init__(self, config=None):
         self.lifecycle = VMLifecycle(vm_id="fake", vmm="firecracker")
+        shared = config.shared_mount if config is not None else None
+        self.host_root = Path(shared.host_dir) if shared is not None else None
+        self.guest_root = shared.guest_path if shared is not None else "/mnt/share"
 
     def create(self):
         self.lifecycle.mark("create_start")
@@ -216,6 +236,43 @@ class FakeVM:
 
     def destroy(self):
         self.lifecycle.mark("destroy_confirmed")
+
+    def _local(self, guest_path):
+        relative = str(guest_path).removeprefix(self.guest_root).lstrip("/")
+        return self.host_root / relative
+
+    @staticmethod
+    def _copy_file(source, destination):
+        source, destination = Path(source), Path(destination)
+        if source.resolve() == destination.resolve():
+            return
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+
+    def upload_file(self, local_path, guest_path, timeout=None):
+        self._copy_file(local_path, self._local(guest_path))
+
+    def download_file(self, guest_path, local_path, timeout=None):
+        self._copy_file(self._local(guest_path), local_path)
+
+    @staticmethod
+    def _copy_dir(source, destination):
+        source, destination = Path(source), Path(destination)
+        if source.resolve() == destination.resolve():
+            return
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.copytree(source, destination)
+
+    def upload_directory(self, local_dir, guest_dir, timeout=None):
+        self._copy_dir(local_dir, self._local(guest_dir))
+
+    def download_directory(self, guest_dir, local_dir, timeout=None):
+        self._copy_dir(self._local(guest_dir), local_dir)
+
+    def read_guest_file(self, guest_path, timeout=None):
+        path = self._local(guest_path)
+        return path.read_text() if path.is_file() else None
 
 
 class FakeHarbor:
@@ -295,7 +352,7 @@ def test_run_episode_writes_clock_sync_and_reconciliation(tmp_path: Path):
         image_map_path=image_map,
         harbor=FakeHarbor(),
         exec_fn=execute,
-        vm_factory=lambda cfg, vid, keep: FakeVM(),
+        vm_factory=lambda cfg, vid, keep: FakeVM(cfg),
     )
 
     assert record["status"] == "completed"

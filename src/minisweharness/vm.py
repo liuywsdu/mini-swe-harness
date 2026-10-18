@@ -1,4 +1,4 @@
-"""单 VM 生命周期管理：创建（firecracker + 共享挂载）→ 就绪 → 销毁。
+"""单 VM 生命周期管理：创建（firecracker + 共享目录）→ 就绪 → 销毁。
 
 H0 冒烟：guest 内 hello-world + 共享挂载双向校验，产出
 ``vm_lifecycle.json``（验收：生命周期时间戳齐全）与 ``smoke.json``。
@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from minisweharness.config import VMConfig
 from minisweharness.firecracker import FirecrackerAPI
@@ -66,7 +66,7 @@ class SingleVM:
         initrd = self._resolve_file(self.config.initrd_path, "Initrd") if self.config.initrd_path else None
         root_drive = self._prepare_root_drive()
 
-        if self.config.shared_mount is not None:
+        if self.config.shared_mount is not None and self.config.shared_mount.backend == "virtiofs":
             self._start_virtiofsd(Path(self.config.shared_mount.host_dir).resolve())
 
         self._launch([executable, "--api-sock", str(self.api_socket)])
@@ -84,7 +84,7 @@ class SingleVM:
             is_read_only=self.config.root_read_only,
         )
         self.api.put_network_interface("eth0", self.config.tap_device, self.config.guest_mac)
-        if self.config.shared_mount is not None:
+        if self.config.shared_mount is not None and self.config.shared_mount.backend == "virtiofs":
             self.api.put_virtio_fs(self.config.shared_mount.tag, self.virtiofsd_socket)
         self.lifecycle.mark("api_configured")
         self.api.instance_start()
@@ -109,7 +109,10 @@ class SingleVM:
             host_dir = Path(self.config.shared_mount.host_dir)
             if not host_dir.is_dir():
                 raise FileNotFoundError(f"Shared mount host dir not found: {host_dir}")
-            if shutil.which(self.config.shared_mount.virtiofsd_executable) is None:
+            if self.config.shared_mount.backend == "ssh":
+                if shutil.which("scp") is None:
+                    raise FileNotFoundError("Executable not found: scp (required by shared_mount.backend=ssh)")
+            elif shutil.which(self.config.shared_mount.virtiofsd_executable) is None:
                 raise FileNotFoundError(
                     f"Executable not found: {self.config.shared_mount.virtiofsd_executable}"
                 )
@@ -207,6 +210,97 @@ class SingleVM:
             raise GuestCommandError(command, result.returncode, output)
         return result.stdout.strip()
 
+    # -------------------------------------------------------- SSH 文件传输
+
+    @staticmethod
+    def _validate_guest_path(value: str | Path) -> str:
+        path = PurePosixPath(str(value))
+        if not path.is_absolute() or str(path) == "/" or "\n" in str(path):
+            raise ValueError(f"guest path must be an absolute non-root path: {value!s}")
+        return str(path)
+
+    def _remote_spec(self, guest_path: str | Path) -> str:
+        path = self._validate_guest_path(guest_path)
+        return f"{self.config.ssh_user}@{self.config.guest_ip}:{shlex.quote(path)}"
+
+    def _scp_command(self, *extra_args: str) -> list[str]:
+        command = [
+            "scp",
+            "-p",
+            "-P",
+            str(self.config.ssh_port),
+            "-o",
+            f"UserKnownHostsFile={self.runtime_dir / 'known_hosts'}",
+            *self.config.ssh_args,
+        ]
+        if self.config.ssh_identity_file:
+            command.extend(["-i", str(Path(self.config.ssh_identity_file).expanduser().resolve())])
+        command.extend(extra_args)
+        return command
+
+    def _run_scp(self, *extra_args: str, timeout: float | None = None) -> None:
+        command = self._scp_command(*extra_args)
+        result = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            timeout=timeout or self.config.command_timeout_seconds,
+        )
+        if result.returncode != 0:
+            output = (result.stdout + result.stderr).strip()
+            raise GuestCommandError(shlex.join(command), result.returncode, output)
+
+    def upload_file(self, local_path: str | Path, guest_path: str | Path, timeout: float | None = None) -> None:
+        """通过 SCP 上传单个文件；guest 父目录自动创建。"""
+        source = self._resolve_file(str(local_path), "Upload file")
+        destination = self._validate_guest_path(guest_path)
+        parent = str(PurePosixPath(destination).parent)
+        self.guest_check(f"mkdir -p {shlex.quote(parent)}", timeout)
+        self._run_scp(str(source), self._remote_spec(destination), timeout=timeout)
+
+    def download_file(self, guest_path: str | Path, local_path: str | Path, timeout: float | None = None) -> None:
+        """通过 SCP 下载单个文件；宿主机父目录自动创建。"""
+        source = self._validate_guest_path(guest_path)
+        destination = Path(local_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        self._run_scp(self._remote_spec(source), str(destination), timeout=timeout)
+
+    def upload_directory(self, local_dir: str | Path, guest_dir: str | Path, timeout: float | None = None) -> None:
+        """通过 ``scp -r`` 上传目录，目标路径保持为 ``guest_dir`` 本身。"""
+        source = Path(local_dir).expanduser().resolve()
+        if not source.is_dir():
+            raise FileNotFoundError(f"Upload directory not found: {source}")
+        destination = self._validate_guest_path(guest_dir)
+        parent = str(PurePosixPath(destination).parent)
+        self.guest_check(
+            f"rm -rf -- {shlex.quote(destination)} && mkdir -p {shlex.quote(parent)}",
+            timeout,
+        )
+        self._run_scp("-r", str(source), self._remote_spec(destination), timeout=timeout)
+
+    def download_directory(self, guest_dir: str | Path, local_dir: str | Path, timeout: float | None = None) -> None:
+        """通过 ``scp -r`` 下载目录，目标路径保持为 ``local_dir`` 本身。"""
+        source = self._validate_guest_path(guest_dir)
+        destination = Path(local_dir)
+        if destination.exists() or destination.is_symlink():
+            if destination == Path(destination.anchor):
+                raise ValueError(f"refusing to replace filesystem root: {destination}")
+            if destination.is_dir() and not destination.is_symlink():
+                shutil.rmtree(destination)
+            else:
+                destination.unlink()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        self._run_scp("-r", self._remote_spec(source), str(destination), timeout=timeout)
+
+    def read_guest_file(self, guest_path: str | Path, timeout: float | None = None) -> str | None:
+        """读取 guest 小文本文件；不存在/不可读时返回 None（供心跳探针使用）。"""
+        path = self._validate_guest_path(guest_path)
+        try:
+            result = self.guest_exec(f"cat -- {shlex.quote(path)}", timeout)
+        except subprocess.TimeoutExpired:
+            return None
+        return result.stdout if result.returncode == 0 else None
+
     def _wait_for_ssh(self) -> None:
         deadline = time.monotonic() + self.config.startup_timeout_seconds
         while time.monotonic() < deadline:
@@ -232,6 +326,8 @@ class SingleVM:
         shared = self.config.shared_mount
         guest_path = shared.guest_path
         self.guest_check(f"mkdir -p {shlex.quote(guest_path)}")
+        if shared.backend == "ssh":
+            return
         mounted = self.guest_exec(f"mountpoint -q {shlex.quote(guest_path)}")
         if mounted.returncode != 0:
             self.guest_check(f"mount -t virtiofs {shlex.quote(shared.tag)} {shlex.quote(guest_path)}")
@@ -252,17 +348,24 @@ class SingleVM:
             host_probe = shared_dir / probe_name
             host_probe.write_text(f"hello from host {self.vm_id}\n")
             try:
-                guest_read = self.guest_check(f"cat {shlex.quote(shared.guest_path)}/{probe_name}")
+                guest_probe = f"{shared.guest_path}/{probe_name}"
+                if shared.backend == "ssh":
+                    self.upload_file(host_probe, guest_probe)
+                guest_read = self.guest_check(f"cat {shlex.quote(guest_probe)}")
                 host_to_guest_ok = guest_read.strip() == host_probe.read_text().strip()
                 reply_name = f"_harness_h0_{self.vm_id}.reply.txt"
-                self.guest_check(f"echo hello from guest > {shlex.quote(shared.guest_path)}/{reply_name}")
+                guest_reply_path = f"{shared.guest_path}/{reply_name}"
+                self.guest_check(f"echo hello from guest > {shlex.quote(guest_reply_path)}")
+                if shared.backend == "ssh":
+                    self.download_file(guest_reply_path, shared_dir / reply_name)
                 guest_reply = (shared_dir / reply_name).read_text().strip()
                 guest_to_host_ok = guest_reply == "hello from guest"
             finally:
                 host_probe.unlink(missing_ok=True)
                 (shared_dir / f"_harness_h0_{self.vm_id}.reply.txt").unlink(missing_ok=True)
             result["shared_mount"] = {
-                "backend": "virtiofs",
+                "backend": shared.backend,
+                "transport": "scp" if shared.backend == "ssh" else "virtiofs",
                 "tag": shared.tag,
                 "host_dir": str(shared_dir),
                 "guest_path": shared.guest_path,
