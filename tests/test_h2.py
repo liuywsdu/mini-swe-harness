@@ -175,6 +175,16 @@ def test_harbor_client_basic_and_bearer_auth():
         HarborClient("harbor.test", token="token123", username="u", password="p")
 
 
+def test_harbor_client_digest_returns_matching_artifact_digest():
+    client = HarborClient("harbor.test")
+    client._get = lambda path: [
+        {"digest": "sha256:abc", "tags": [{"name": "other"}]},
+        {"digest": "sha256:def", "tags": [{"name": "local"}]},
+    ]
+    assert client.digest("core-bench/agentos-core-bench", "local") == "sha256:def"
+    assert client.digest("core-bench/agentos-core-bench", "missing") == ""
+
+
 # ------------------------------------------------------------------ override
 
 

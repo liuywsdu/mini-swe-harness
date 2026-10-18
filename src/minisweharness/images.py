@@ -191,7 +191,7 @@ class HarborClient:
         )
         artifacts = self._get(path)
         for artifact in artifacts:
-            if any(tag["name"] == tag for tag in artifact.get("tags", [])):
+            if any(item["name"] == tag for item in artifact.get("tags", [])):
                 return artifact.get("digest", "")
         return ""
 
