@@ -121,3 +121,11 @@ def test_scp_uses_legacy_protocol_without_sftp_subsystem(tmp_path: Path):
     command = vm._scp_command("source", "destination")
     assert command[:2] == ["scp", "-O"]
     vm.destroy()
+
+
+def test_single_vm_accepts_baseline_factory_positional_args(tmp_path: Path):
+    # baseline/run-episode 的 VMFactory 约定：(config, vm_id, keep_runtime_dir)
+    vm = SingleVM(_config(tmp_path), "positional-vm", False)
+    assert vm.vm_id == "positional-vm"
+    assert vm.keep_runtime_dir is False
+    vm.destroy()

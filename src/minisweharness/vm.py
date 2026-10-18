@@ -42,7 +42,7 @@ class GuestCommandError(RuntimeError):
 class SingleVM:
     """一台 firecracker microVM 的完整生命周期（H0 范围）。"""
 
-    def __init__(self, config: VMConfig, *, vm_id: str | None = None, keep_runtime_dir: bool = False):
+    def __init__(self, config: VMConfig, vm_id: str | None = None, keep_runtime_dir: bool = False):
         self.config = config
         self.vm_id = vm_id or f"h0-{uuid.uuid4().hex[:12]}"
         self.lifecycle = VMLifecycle(vm_id=self.vm_id, vmm="firecracker")
