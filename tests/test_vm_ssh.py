@@ -114,3 +114,10 @@ def test_upload_file_uses_scp_with_guest_parent_setup(tmp_path: Path):
     assert scp_calls[0][0] == str(source.resolve())
     assert scp_calls[0][1] == "root@172.16.0.2:'/mnt/share/file with space.txt'"
     vm.destroy()
+
+
+def test_scp_uses_legacy_protocol_without_sftp_subsystem(tmp_path: Path):
+    vm = SingleVM(_config(tmp_path), vm_id="scp-protocol")
+    command = vm._scp_command("source", "destination")
+    assert command[:2] == ["scp", "-O"]
+    vm.destroy()

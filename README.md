@@ -48,6 +48,9 @@ examples/image_map.jsonl
 不调用 Firecracker `/virtio-fs`，也不要求 virtiofsd。仅当 VMM 确实支持相应
 API 时才使用 `backend: "virtiofs"`。
 
+SCP 使用传统协议模式（`scp -O`），因此 guest 不需要启用 SFTP subsystem；
+只需 sshd 与远端 `scp` 命令可用。
+
 ```bash
 pip install -e .
 mini-swe-harness smoke --config examples/h0_smoke.json --run-dir runs/h0-001

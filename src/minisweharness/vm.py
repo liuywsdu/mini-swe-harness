@@ -226,6 +226,7 @@ class SingleVM:
     def _scp_command(self, *extra_args: str) -> list[str]:
         command = [
             "scp",
+            "-O",  # 强制传统 SCP 协议；不依赖 guest sshd 的 SFTP subsystem
             "-p",
             "-P",
             str(self.config.ssh_port),
