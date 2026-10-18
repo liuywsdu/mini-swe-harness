@@ -193,7 +193,9 @@ class SingleVM:
         command.extend([f"{self.config.ssh_user}@{self.config.guest_ip}", remote_command])
         return command
 
-    def guest_exec(self, command: str, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+    def guest_exec(
+        self, command: str, timeout: float | None = None, *, input_text: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
         """经 SSH 在 guest 内执行命令；超时按 SSH 连接超时处理。"""
         remote = _build_remote_command(command, "/root", {}, ["bash", "-lc"])
         return subprocess.run(
@@ -201,6 +203,7 @@ class SingleVM:
             text=True,
             capture_output=True,
             timeout=timeout or self.config.command_timeout_seconds,
+            input=input_text,
         )
 
     def guest_check(self, command: str, timeout: float | None = None) -> str:
@@ -209,6 +212,23 @@ class SingleVM:
         if result.returncode != 0:
             raise GuestCommandError(command, result.returncode, output)
         return result.stdout.strip()
+
+    def docker_login(self, registry: str, username: str, password: str, timeout: float | None = None) -> None:
+        """guest 内登录私有 registry；密码只经 stdin 传递，不进命令行或日志。"""
+        if not registry or not username or not password:
+            raise ValueError("registry, username and password are required for docker login")
+        command = (
+            f"docker login {shlex.quote(registry)} "
+            f"--username {shlex.quote(username)} --password-stdin"
+        )
+        result = self.guest_exec(command, timeout or 60, input_text=password + "\n")
+        if result.returncode != 0:
+            output = (result.stdout + result.stderr).strip()
+            raise GuestCommandError(command, result.returncode, output)
+
+    def docker_logout(self, registry: str, timeout: float | None = None) -> None:
+        """清除 guest 内该 registry 的临时登录凭据。"""
+        self.guest_check(f"docker logout {shlex.quote(registry)}", timeout or 60)
 
     # -------------------------------------------------------- SSH 文件传输
 

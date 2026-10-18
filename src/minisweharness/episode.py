@@ -127,6 +127,8 @@ def run_episode(
     registry: str = DEFAULT_REGISTRY,
     image_map_path: str | Path | None = None,
     harbor: HarborAPI | None = None,
+    registry_username: str = "",
+    registry_password: str = "",
     keep_runtime_dir: bool = False,
     exec_fn: ExecFn | None = None,
     vm_factory: VMFactory | None = None,
@@ -134,6 +136,8 @@ def run_episode(
     thresholds: QualityThresholds | None = None,
 ) -> dict:
     """跑一个 episode；返回 episode.json 记录。异常时尽力落盘 status=failed。"""
+    if bool(registry_username) != bool(registry_password):
+        raise ValueError("registry_username and registry_password must be provided together")
     run_dir = Path(run_dir)
     episode_id = manifest.resolved_episode_id
     episode_dir = run_dir / "episodes" / episode_id
@@ -238,7 +242,18 @@ def run_episode(
 
         # ---- 阶段 1：镜像预热（setup，不进 episode 测量窗口）
         anchors.mark("warmup_start")
-        _warmup_image(execute, resolution.image)
+        registry_logged_in = False
+        try:
+            if registry_username:
+                vm.docker_login(registry, registry_username, registry_password)
+                registry_logged_in = True
+            _warmup_image(execute, resolution.image)
+        finally:
+            if registry_logged_in:
+                try:
+                    vm.docker_logout(registry)
+                except Exception as exc:  # noqa: BLE001 — logout 失败不覆盖 warmup 结果
+                    logger.warning("docker logout failed for %s: %s", registry, exc)
         anchors.mark("warmup_done")
 
         # ---- 阶段 2：注入（源 store + override 进共享挂载）

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -128,4 +129,22 @@ def test_single_vm_accepts_baseline_factory_positional_args(tmp_path: Path):
     vm = SingleVM(_config(tmp_path), "positional-vm", False)
     assert vm.vm_id == "positional-vm"
     assert vm.keep_runtime_dir is False
+    vm.destroy()
+
+
+def test_docker_login_password_uses_stdin_not_command_line(tmp_path: Path):
+    vm = SingleVM(_config(tmp_path), vm_id="docker-auth")
+    captured = {}
+
+    def fake_exec(command, timeout=None, *, input_text=None):
+        captured["command"] = command
+        captured["input_text"] = input_text
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    vm.guest_exec = fake_exec
+    vm.docker_login("harbor.private:12443", "robot$h2", "secret")
+
+    assert captured["input_text"] == "secret\n"
+    assert "--password-stdin" in captured["command"]
+    assert "secret" not in captured["command"]
     vm.destroy()

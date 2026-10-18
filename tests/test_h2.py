@@ -6,6 +6,7 @@ firecracker、docker、Linux /proc、真实 Harbor。真机验收见 README「H2
 
 from __future__ import annotations
 
+import base64
 import gzip
 import hashlib
 import json
@@ -164,6 +165,16 @@ def test_harbor_client_project_repo_parsing():
         HarborClient._project_repo("no-slash")
 
 
+def test_harbor_client_basic_and_bearer_auth():
+    basic = HarborClient("harbor.test", username="robot$h2", password="secret")
+    expected = base64.b64encode(b"robot$h2:secret").decode("ascii")
+    assert basic._headers == {"Authorization": f"Basic {expected}"}
+    bearer = HarborClient("harbor.test", token="token123")
+    assert bearer._headers == {"Authorization": "Bearer token123"}
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        HarborClient("harbor.test", token="token123", username="u", password="p")
+
+
 # ------------------------------------------------------------------ override
 
 
@@ -287,6 +298,7 @@ class FakeVM:
 
     def __init__(self, config=None):
         self.lifecycle = VMLifecycle(vm_id="fake", vmm="firecracker")
+        self.registry_auth_calls = []
         shared = config.shared_mount if config is not None else None
         self.host_root = Path(shared.host_dir) if shared is not None else None
         self.guest_root = shared.guest_path if shared is not None else "/mnt/share"
@@ -300,6 +312,12 @@ class FakeVM:
 
     def destroy(self):
         self.lifecycle.mark("destroy_confirmed")
+
+    def docker_login(self, registry, username, password):
+        self.registry_auth_calls.append(("login", registry, username, password))
+
+    def docker_logout(self, registry):
+        self.registry_auth_calls.append(("logout", registry))
 
     def _local(self, guest_path):
         relative = str(guest_path).removeprefix(self.guest_root).lstrip("/")
@@ -416,6 +434,54 @@ def test_run_episode_missing_mapping_errors_before_vm(tmp_path: Path):
             harbor=FakeHarbor({}),
             vm_factory=lambda cfg, vid, keep: FakeVM(cfg),
         )
+
+
+def test_run_episode_private_registry_logs_in_and_out(tmp_path: Path):
+    image_map_path = _image_map(tmp_path, [{"benchmark": "b", "task_id": "t", "docker_image": "b/repo"}])
+    episode_dir = tmp_path / "run" / "episodes" / "ep-private"
+    calls = []
+    vms = []
+
+    def execute(command: str, timeout: float) -> subprocess.CompletedProcess:
+        calls.append(command)
+        if "export-events" in command:
+            (episode_dir / "shared" / "guest_events.jsonl").write_text(
+                '{"kind":"session_snapshot","final":true}\n'
+            )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def vm_factory(cfg, vid, keep):
+        vm = FakeVM(cfg)
+        vms.append(vm)
+        return vm
+
+    manifest = EpisodeManifest(
+        benchmark="b",
+        task_id="t",
+        source_episode="src",
+        episode_id="ep-private",
+        source_store=str(_source_store(tmp_path, "ep-private")),
+    )
+    record = run_episode(
+        manifest,
+        _vm_config(tmp_path),
+        tmp_path / "run",
+        registry="harbor.private:12443",
+        image_map_path=image_map_path,
+        harbor=FakeHarbor({"b/repo": ["v1"]}),
+        registry_username="robot$h2",
+        registry_password="secret",
+        exec_fn=execute,
+        vm_factory=vm_factory,
+    )
+
+    assert record["status"] == "completed", record
+    assert vms[0].registry_auth_calls == [
+        ("login", "harbor.private:12443", "robot$h2", "secret"),
+        ("logout", "harbor.private:12443"),
+    ]
+    assert all("secret" not in command for command in calls)
+    assert "secret" not in json.dumps(record)
 
 
 def test_run_episode_skipped_on_ambiguous_tags(tmp_path: Path):

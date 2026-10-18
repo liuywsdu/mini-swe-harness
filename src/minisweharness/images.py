@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import ssl
 import urllib.parse
@@ -137,15 +138,27 @@ class HarborClient:
         *,
         ca_cert: str = "",
         token: str = "",
+        username: str = "",
+        password: str = "",
         timeout: float = 30.0,
     ):
+        if token and (username or password):
+            raise ValueError("Harbor bearer token and username/password are mutually exclusive")
+        if bool(username) != bool(password):
+            raise ValueError("Harbor username and password must be provided together")
         self.registry = registry
         self.timeout = timeout
         context = None
         if ca_cert:
             context = ssl.create_default_context(cafile=ca_cert)
         self._context = context
-        self._headers = {"Authorization": f"Bearer {token}"} if token else {}
+        if token:
+            self._headers = {"Authorization": f"Bearer {token}"}
+        elif username:
+            basic = base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
+            self._headers = {"Authorization": f"Basic {basic}"}
+        else:
+            self._headers = {}
 
     def _get(self, path: str) -> list[dict]:
         url = f"https://{self.registry}/api/v2.0{path}"

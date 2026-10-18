@@ -145,6 +145,19 @@ mini-swe-harness run-episode \
 4. pull 流量不落入 episode 测量窗口（按 `anchors.jsonl` 的
    `warmup_done → episode_start` 切窗验证）。
 
+私有 registry 认证通过环境变量提供，不写入 manifest 或命令行：
+
+```bash
+export HARBOR_USERNAME='robot$project+h2'
+read -rsp 'Harbor password: ' HARBOR_PASSWORD; export HARBOR_PASSWORD; echo
+# 自签名 CA 时另设：export HARBOR_CA_CERT=/path/to/ca.crt
+```
+
+`HARBOR_USERNAME/HARBOR_PASSWORD` 同时用于 Harbor API Basic Auth 与 guest
+内 `docker login --password-stdin`；镜像预热后立即 `docker logout`。也可只设
+`HARBOR_TOKEN` 作为 API Bearer token，但它不能替代 guest 拉取私有镜像所需的
+用户名/密码。
+
 真机验收（需 Linux/KVM + guest 内 docker + Harbor 可达 + 已索引源 store）：
 
 ```bash

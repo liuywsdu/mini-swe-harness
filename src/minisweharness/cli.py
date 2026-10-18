@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -19,10 +20,30 @@ from minisweharness.config import VMConfig
 from minisweharness.episode import run_episode
 from minisweharness.guardrail import GuardrailPolicy
 from minisweharness.images import DEFAULT_REGISTRY
+from minisweharness.images import HarborClient
 from minisweharness.manifest import EpisodeManifest
 from minisweharness.scheduler import run_episodes
 from minisweharness.sampler import DEFAULT_INTERVAL_SECONDS, VMMSampler
 from minisweharness.vm import run_h0_smoke
+
+
+def _harbor_from_environment(registry: str) -> HarborClient:
+    """从环境变量读取 registry 认证；密码不出现在 CLI 参数或进程列表。"""
+    return HarborClient(
+        registry,
+        ca_cert=os.environ.get("HARBOR_CA_CERT", ""),
+        token=os.environ.get("HARBOR_TOKEN", ""),
+        username=os.environ.get("HARBOR_USERNAME", ""),
+        password=os.environ.get("HARBOR_PASSWORD", ""),
+    )
+
+
+def _registry_credentials_from_environment() -> tuple[str, str]:
+    username = os.environ.get("HARBOR_USERNAME", "")
+    password = os.environ.get("HARBOR_PASSWORD", "")
+    if bool(username) != bool(password):
+        raise ValueError("HARBOR_USERNAME and HARBOR_PASSWORD must be provided together")
+    return username, password
 
 
 def _cmd_sample(args: argparse.Namespace) -> int:
@@ -58,12 +79,16 @@ def _cmd_sample(args: argparse.Namespace) -> int:
 def _cmd_run_episode(args: argparse.Namespace) -> int:
     manifest = EpisodeManifest.from_json(args.manifest)
     vm_config = VMConfig.from_json(args.config)
+    username, password = _registry_credentials_from_environment()
     record = run_episode(
         manifest,
         vm_config,
         args.run_dir,
         registry=args.registry,
         image_map_path=args.image_map,
+        harbor=_harbor_from_environment(args.registry),
+        registry_username=username,
+        registry_password=password,
         keep_runtime_dir=args.keep_runtime_dir,
     )
     print(json.dumps(record, indent=2, ensure_ascii=False))
@@ -93,6 +118,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         admission_poll_seconds=args.poll,
         admission_timeout_seconds=args.timeout,
     )
+    username, password = _registry_credentials_from_environment()
     results = run_episodes(
         episodes,
         VMConfig.from_json(args.config),
@@ -100,6 +126,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
         policy=policy,
         registry=args.registry,
         image_map_path=args.image_map,
+        harbor=_harbor_from_environment(args.registry),
+        registry_username=username,
+        registry_password=password,
         keep_runtime_dir=args.keep_runtime_dir,
     )
     for record in results:
