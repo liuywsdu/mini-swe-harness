@@ -405,7 +405,10 @@ class SingleVM:
         if process is not None and process.poll() is None:
             try:
                 self.api.send_ctrl_alt_del()
-                process.wait(timeout=5)
+                # Guest systemd/Docker/containerd may need more than a few
+                # seconds to flush state after Ctrl+Alt+Del; killing too early
+                # can corrupt the copied rootfs on the next boot.
+                process.wait(timeout=30)
             except Exception:
                 process.terminate()
                 try:
