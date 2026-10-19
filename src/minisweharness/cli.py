@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 from minisweharness.baseline import measure_baseline
-from minisweharness.config import VMConfig
+from minisweharness.config import VMConfig, derive_slot_config
 from minisweharness.episode import run_episode
 from minisweharness.guardrail import GuardrailPolicy
 from minisweharness.images import DEFAULT_REGISTRY
@@ -119,9 +119,27 @@ def _cmd_run(args: argparse.Namespace) -> int:
         admission_timeout_seconds=args.timeout,
     )
     username, password = _registry_credentials_from_environment()
+    configs = [VMConfig.from_json(path) for path in args.config]
+    if len(configs) == 1 and args.concurrency > 1:
+        # 单 config 自动按槽位派生网络三元组（tap/guest_ip/guest_mac 互不冲突）
+        configs = [
+            derive_slot_config(configs[0], slot, ip_mode=args.ip_mode)
+            for slot in range(args.concurrency)
+        ]
+        for slot, config in enumerate(configs):
+            print(
+                f"slot {slot}: tap={config.tap_device} guest_ip={config.guest_ip} mac={config.guest_mac}",
+                file=sys.stderr,
+            )
+        print(
+            "hint: prepare host networking first, e.g. "
+            "`mini-swe-harness make-configs --base <config> --slots %d --ip-mode %s` prints the commands"
+            % (args.concurrency, args.ip_mode),
+            file=sys.stderr,
+        )
     results = run_episodes(
         episodes,
-        VMConfig.from_json(args.config),
+        configs,
         args.run_dir,
         policy=policy,
         registry=args.registry,
@@ -143,6 +161,46 @@ def _cmd_smoke(args: argparse.Namespace) -> int:
     record = run_h0_smoke(config, Path(args.run_dir), keep_runtime_dir=args.keep_runtime_dir)
     print(json.dumps(record, indent=2, ensure_ascii=False))
     print(f"vm_lifecycle.json written to {Path(args.run_dir) / 'vm_lifecycle.json'}", file=sys.stderr)
+    return 0
+
+
+def _cmd_make_configs(args: argparse.Namespace) -> int:
+    """按并发槽位展开 VM 配置并打印宿主机网络准备命令。"""
+    base = VMConfig.from_json(args.base)
+    ipaddress = __import__("ipaddress")
+    base_ip = int(ipaddress.IPv4Address(base.guest_ip))
+    configs = []
+    for slot in range(args.slots):
+        config = derive_slot_config(base, slot, ip_mode=args.ip_mode)
+        configs.append(config)
+        path = Path(args.out_dir) / f"vm_config.slot{slot}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = dict(config.__dict__)
+        if data["shared_mount"] is not None:
+            data["shared_mount"] = dict(data["shared_mount"].__dict__)
+        path.write_text(json.dumps(data, indent=2) + "\n")
+        print(f"# slot {slot}: {path}", file=sys.stderr)
+        print(f"#   tap={config.tap_device} guest_ip={config.guest_ip} mac={config.guest_mac}", file=sys.stderr)
+    print("sudo sysctl -w net.ipv4.ip_forward=1")
+    print("# 出网（guest 拉 Harbor）按需启用 MASQUERADE，<出口网卡> 替换为实际接口：")
+    print("# sudo iptables -t nat -A POSTROUTING -o <出口网卡> -j MASQUERADE")
+    for slot, config in enumerate(configs):
+        if args.ip_mode == "third_octet":
+            # 每 tap 独立 /30：172.16.<slot>.1/30 ↔ guest 172.16.<slot>.2
+            host_ip = str(ipaddress.IPv4Address((base_ip & 0xFFFF0000) + slot * 256 + 1))
+            print(f"sudo ip tuntap add {config.tap_device} mode tap user \"$USER\"")
+            print(f"sudo ip addr add {host_ip}/30 dev {config.tap_device}")
+            print(f"sudo ip link set {config.tap_device} up")
+        else:
+            # 所有 tap 挂同一 bridge，bridge 占 base 所在 /24 的 .1
+            bridge_ip = str(ipaddress.IPv4Address(base_ip & 0xFFFFFF00 | 1))
+            if slot == 0:
+                print(f"sudo ip link add br0 type bridge")
+                print(f"sudo ip addr add {bridge_ip}/24 dev br0")
+                print("sudo ip link set br0 up")
+            print(f"sudo ip tuntap add {config.tap_device} mode tap user \"$USER\"")
+            print(f"sudo ip link set {config.tap_device} master br0")
+            print(f"sudo ip link set {config.tap_device} up")
     return 0
 
 
@@ -185,7 +243,18 @@ def build_parser() -> argparse.ArgumentParser:
     baseline.set_defaults(func=_cmd_baseline)
 
     run = subcommands.add_parser("run", help="H5 并行调度 episode 矩阵 + guardrail")
-    run.add_argument("--config", required=True, help="VM 配置 JSON")
+    run.add_argument(
+        "--config",
+        action="append",
+        required=True,
+        help="VM 配置 JSON（可多次，每并发槽位一份；仅一份时按 --concurrency/--ip-mode 自动派生）",
+    )
+    run.add_argument(
+        "--ip-mode",
+        choices=["last_octet", "third_octet"],
+        default="last_octet",
+        help="单 config 自动派生 guest_ip 的方式：末字节（bridge+/24，默认）或第三字节（每 tap /30）",
+    )
     run.add_argument("--run-dir", required=True, help="run 输出目录（§6 布局）")
     run.add_argument("--image-map", required=True, help="镜像映射表 JSONL（§5.4）")
     run.add_argument("--manifest", action="append", required=True, help="episode manifest JSON（可多次）")
@@ -198,6 +267,15 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--timeout", type=float, default=600.0, help="排队最长等待秒")
     run.add_argument("--keep-runtime-dir", action="store_true")
     run.set_defaults(func=_cmd_run)
+
+    make_configs = subcommands.add_parser(
+        "make-configs", help="按并发槽位展开 VM 配置（网络三元组互不冲突）并打印宿主机 tap/bridge 命令"
+    )
+    make_configs.add_argument("--base", required=True, help="base VM 配置 JSON（视为 slot 0）")
+    make_configs.add_argument("--slots", type=int, required=True, help="并发槽位数")
+    make_configs.add_argument("--ip-mode", choices=["last_octet", "third_octet"], default="last_octet")
+    make_configs.add_argument("--out-dir", required=True, help="槽位配置输出目录")
+    make_configs.set_defaults(func=_cmd_make_configs)
     return parser
 
 

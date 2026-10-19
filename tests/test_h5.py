@@ -67,7 +67,7 @@ def test_run_episodes_respects_concurrency(tmp_path: Path):
     max_active = 0
     lock = threading.Lock()
 
-    def run_fn(manifest: EpisodeManifest) -> dict:
+    def run_fn(manifest: EpisodeManifest, slot_index: int) -> dict:
         nonlocal active, max_active
         with lock:
             active += 1
@@ -77,9 +77,10 @@ def test_run_episodes_respects_concurrency(tmp_path: Path):
             active -= 1
         return {"episode_id": manifest.resolved_episode_id, "status": "completed"}
 
+    # 单 config = 单网络身份 = 单槽位（串行）；并发需多槽位 config 池
     results = run_episodes(
         [_manifest(str(i)) for i in range(4)],
-        _vm_config(),
+        _slot_pool(2),
         tmp_path / "run",
         policy=GuardrailPolicy(max_concurrency=2),
         snapshot_fn=_ok_snapshot,
@@ -92,7 +93,7 @@ def test_run_episodes_respects_concurrency(tmp_path: Path):
 
 
 def test_run_episodes_rejects_on_pressure(tmp_path: Path):
-    def run_fn(manifest: EpisodeManifest) -> dict:
+    def run_fn(manifest: EpisodeManifest, slot_index: int) -> dict:
         raise AssertionError("should not run when guardrail rejects")
 
     results = run_episodes(
@@ -118,7 +119,7 @@ def test_run_episodes_queues_then_admits(tmp_path: Path):
         calls[0] += 1
         return _ok_snapshot() if calls[0] > 3 else HostSnapshot(1.0, 100.0)
 
-    def run_fn(manifest: EpisodeManifest) -> dict:
+    def run_fn(manifest: EpisodeManifest, slot_index: int) -> dict:
         ran.append(manifest.resolved_episode_id)
         return {"episode_id": manifest.resolved_episode_id, "status": "completed"}
 
@@ -152,7 +153,7 @@ def test_run_episodes_queue_timeout_rejects(tmp_path: Path):
 
 
 def test_run_episodes_records_exception_from_runner(tmp_path: Path):
-    def run_fn(manifest: EpisodeManifest) -> dict:
+    def run_fn(manifest: EpisodeManifest, slot_index: int) -> dict:
         raise RuntimeError("boom")
 
     results = run_episodes(
@@ -167,3 +168,78 @@ def test_run_episodes_records_exception_from_runner(tmp_path: Path):
     assert "boom" in results[0]["failure"]
     episode_json = tmp_path / "run" / "episodes" / "ep-t" / "episode.json"
     assert episode_json.is_file()
+
+
+# ------------------------------------------------------------------ 并发网络槽位
+
+
+def _slot_pool(size: int) -> list:
+    from minisweharness.config import derive_slot_config
+
+    base = _vm_config()
+    return [derive_slot_config(base, slot) for slot in range(size)]
+
+
+def test_run_episodes_assigns_distinct_slots_and_configs(tmp_path: Path):
+    seen: dict[int, str] = {}
+    lock = threading.Lock()
+
+    def run_fn(manifest: EpisodeManifest, slot_index: int) -> dict:
+        with lock:
+            seen[manifest.resolved_episode_id] = slot_index
+        time.sleep(0.02)
+        return {"episode_id": manifest.resolved_episode_id, "status": "completed"}
+
+    pool = _slot_pool(2)
+    results = run_episodes(
+        [_manifest(str(i)) for i in range(4)],
+        pool,
+        tmp_path / "run",
+        policy=GuardrailPolicy(max_concurrency=2),
+        snapshot_fn=_ok_snapshot,
+        run_episode_fn=run_fn,
+    )
+    assert all(r["status"] == "completed" for r in results)
+    # 同一时刻槽位互不重复 → 4 个 episode 分到的槽位都在 {0,1} 且无超发
+    assert set(seen.values()) <= {0, 1}
+    assert len(seen) == 4
+
+
+def test_run_episodes_rejects_pool_with_conflicting_configs(tmp_path: Path):
+    duplicate = _vm_config()
+    with pytest.raises(ValueError, match="tap_device"):
+        run_episodes(
+            [_manifest("t")],
+            [duplicate, duplicate],
+            tmp_path / "run",
+            policy=GuardrailPolicy(max_concurrency=2),
+            snapshot_fn=_ok_snapshot,
+            run_episode_fn=lambda m, s: {"status": "completed"},
+        )
+
+
+def test_run_episodes_throttles_to_pool_size(tmp_path: Path):
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def run_fn(manifest: EpisodeManifest, slot_index: int) -> dict:
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.03)
+        with lock:
+            active -= 1
+        return {"episode_id": manifest.resolved_episode_id, "status": "completed"}
+
+    # 3 并发 policy 但 config 池只有 2 个槽位 → 同时运行不超过 2
+    run_episodes(
+        [_manifest(str(i)) for i in range(4)],
+        _slot_pool(2),
+        tmp_path / "run",
+        policy=GuardrailPolicy(max_concurrency=3),
+        snapshot_fn=_ok_snapshot,
+        run_episode_fn=run_fn,
+    )
+    assert max_active == 2

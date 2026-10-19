@@ -136,6 +136,7 @@ def run_episode(
     vm_factory: VMFactory | None = None,
     baseline_profile_id: str | None = None,
     thresholds: QualityThresholds | None = None,
+    slot_index: int | None = None,
 ) -> dict:
     """跑一个 episode；返回 episode.json 记录。异常时尽力落盘 status=failed。"""
     if bool(registry_username) != bool(registry_password):
@@ -189,6 +190,7 @@ def run_episode(
             "profile_digest": manifest.profile_digest or None,
             "source_episode": manifest.source_episode or None,
             "status": "skipped",
+            "slot_index": slot_index,
             "image": None,
             "image_digest": None,
             "image_source": None,
@@ -205,6 +207,7 @@ def run_episode(
             episode_id,
             "skipped",
             image_map={skipped.docker_image: {"skipped": skipped.reason, "tags": list(skipped.tags)}},
+            slot_index=slot_index,
         )
         return record
 
@@ -353,12 +356,17 @@ def run_episode(
         source_image=source_image,
         quality=quality,
         baseline_profile_id=baseline_id,
+        slot_index=slot_index,
+        vm_tap_device=config.tap_device,
+        vm_guest_ip=config.guest_ip,
+        vm_guest_mac=config.guest_mac,
     )
     _update_run_manifest(
         run_dir,
         episode_id,
         status,
         image_map={resolution.docker_image: {"tag": resolution.tag, "digest": resolution.digest or None}},
+        slot_index=slot_index,
     )
     return episode_json
 
@@ -369,6 +377,7 @@ def record_episode_outcome(
     *,
     status: str,
     reason: str | None = None,
+    slot_index: int | None = None,
 ) -> dict:
     """为未进入 run_episode 的 episode（如 guardrail 拒绝/调度异常）落盘结果。"""
     run_dir = Path(run_dir)
@@ -384,6 +393,7 @@ def record_episode_outcome(
         "profile_digest": manifest.profile_digest or None,
         "source_episode": manifest.source_episode or None,
         "status": status,
+        "slot_index": slot_index,
         "image": None,
         "image_digest": None,
         "image_source": None,
@@ -480,6 +490,10 @@ def _write_episode_json(
     source_image: str,
     quality: dict,
     baseline_profile_id: str | None,
+    slot_index: int | None = None,
+    vm_tap_device: str = "",
+    vm_guest_ip: str = "",
+    vm_guest_mac: str = "",
 ) -> dict:
     record = {
         "episode_id": manifest.resolved_episode_id,
@@ -490,6 +504,10 @@ def _write_episode_json(
         "profile_digest": manifest.profile_digest or None,
         "source_episode": manifest.source_episode or None,
         "status": status,
+        "slot_index": slot_index,
+        "vm_tap_device": vm_tap_device or None,
+        "vm_guest_ip": vm_guest_ip or None,
+        "vm_guest_mac": vm_guest_mac or None,
         "image": resolution.image,
         "image_digest": resolution.digest or None,
         "image_source": resolution.image_source,
@@ -511,6 +529,7 @@ def _update_run_manifest(
     status: str,
     *,
     image_map: dict | None = None,
+    slot_index: int | None = None,
 ) -> None:
     """§6 run_manifest.json：增量登记 episode 与 image_map（baseline/concurrency 留待 H4/H5）。"""
     path = run_dir / "run_manifest.json"
@@ -534,7 +553,7 @@ def _update_run_manifest(
         manifest["image_map"] = {**manifest.get("image_map", {}), **image_map}
     manifest["episodes"] = [
         *[e for e in manifest.get("episodes", []) if e["episode_id"] != episode_id],
-        {"episode_id": episode_id, "status": status},
+        {"episode_id": episode_id, "status": status, "slot_index": slot_index},
     ]
     run_dir.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")

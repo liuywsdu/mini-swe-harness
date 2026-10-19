@@ -428,7 +428,7 @@ def test_run_episode_completed_flow(tmp_path: Path):
     assert (episode_dir / "shared" / "override.json").is_file()
 
     run_manifest = json.loads((tmp_path / "run" / "run_manifest.json").read_text())
-    assert run_manifest["episodes"] == [{"episode_id": "ep-h2", "status": "completed"}]
+    assert run_manifest["episodes"] == [{"episode_id": "ep-h2", "status": "completed", "slot_index": None}]
     assert run_manifest["image_map"] == {"swebench/repo": {"tag": "v1", "digest": "sha256:abc"}}
     assert set(run_manifest["host"]) == {"uname", "cpu_model", "mem_bytes"}
     assert isinstance(run_manifest["started_wall"], (int, float))

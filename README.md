@@ -30,7 +30,7 @@ src/minisweharness/
   quality.py        # H4 质量记录：对账比值/coverage 超阈值 → quality 条目
   host.py           # 宿主机信息 + run_manifest 默认形状
   guardrail.py      # H5 guardrail：并发上限 + 内存/磁盘下限接入判定
-  scheduler.py      # H5 VM 池并行调度：排队/拒绝，无静默超载
+  scheduler.py      # H5 VM 池并行调度：槽位化 config 池 + 排队/拒绝，无静默超载
   lifecycle.py      # VMLifecycle → vm_lifecycle.json（§6 规范）
   timestamps.py     # wall + monotonic 双时间戳（横向前提①）
 tests/              # 纯逻辑单测（伪造 proc 树 + 注入时钟，无需 VM/Linux）
@@ -224,11 +224,32 @@ mini-swe-harness run-episode --manifest <真机 manifest>.json --config <真机 
 策略排队等待（默认）或直接拒绝（`--no-queue`），绝不静默超载。事件隔离由
 ``run_episode`` 的独立 episode 目录保证。
 
+**并发网络槽位**：每个并发 VM 必须独占一套 ``tap_device``/``guest_ip``/
+``guest_mac``（一个 tap 只能挂一个 VMM）。`run` 接受每槽位一份 ``--config``
+（可多次）；只给一份时按 ``--concurrency`` 与 ``--ip-mode`` 用
+``config.derive_slot_config`` 自动派生（`last_octet`=bridge 汇聚 /24，默认；
+`third_octet`=每 tap 一个 /30）。config 池内三元组重复在起跑前报错；槽位数
+小于 ``--concurrency`` 时由槽池节流。episode 完成即回收槽位（done callback），
+episode.json / run_manifest 落 ``slot_index`` 与 ``vm_tap_device``/
+``vm_guest_ip``/``vm_guest_mac``，事后可把测量数据对回具体 tap/IP。
+
 ```bash
+# 一次性：生成槽位配置 + 打印宿主机 tap/bridge 准备命令（在宿主机执行输出的命令）
+mini-swe-harness make-configs --base vm_base.json --slots 4 \
+    --ip-mode third_octet --out-dir configs/
+
+# 批量 run：多份 config（与 --concurrency 一一对应）
 mini-swe-harness run \
-    --config <真机 VM 配置>.json \
+    --config configs/vm_config.slot0.json --config configs/vm_config.slot1.json \
     --run-dir runs/h5-001 \
     --image-map examples/image_map.jsonl \
+    --manifest m1.json --manifest m2.json --manifest m3.json \
+    --concurrency 2 --memory-floor 12 --disk-floor 50
+
+# 或：单份 config 自动派生（等价于上面 make-configs + 多份 --config）
+mini-swe-harness run \
+    --config vm_base.json --ip-mode third_octet \
+    --run-dir runs/h5-001 --image-map examples/image_map.jsonl \
     --manifest m1.json --manifest m2.json --manifest m3.json \
     --concurrency 2 --memory-floor 12 --disk-floor 50
 ```
@@ -251,3 +272,4 @@ guardrail 口径沿用 `gpu_tasks/container.py` 的 POLICY 思路：内存/磁�
 - [x] **H3 时钟校准 + 双层 join**（2026-10-16 完成实现；`clocksync.py` + `join.py` + episode 集成，假心跳/假 guest_events/假 vm_samples 桩冒烟通过，覆盖 offset 中位数/drift_ppm/去重/窗口过滤/差值比值 ≤1；真机校时与对账验收待 Linux/KVM 环境）
 - [x] **H4 基线 + reconciliation + 质量记录**（2026-10-16 完成实现；`baseline.py` + `quality.py` + `host.py` + episode 集成 + `baseline` 子命令，假 VM/假采样器/合成样本桩冒烟通过，覆盖速率/峰值/积分汇总、基线文件生成与 run_manifest 回写、超阈值/缺失/coverage 质量条目；真机空转基线验收待 Linux/KVM 环境）
 - [x] **H5 并行调度 + guardrail**（2026-10-16 完成实现；`guardrail.py` + `scheduler.py` + `run` 子命令，假 snapshot/假 run_episode_fn 桩冒烟通过，覆盖并发上限、内存/磁盘下限拒绝、排队后接入、排队超时、runner 异常落盘；真机多 VM 并发验收待 Linux/KVM 环境）
+- [x] **H5a 并发网络槽位**（2026-10-19 完成实现；`config.derive_slot_config` + scheduler config 池/槽位分配（done callback 回收）+ `run` 单 config 自动派生 + `make-configs` 子命令，桩冒烟覆盖槽位互斥/池冲突拒绝/槽池节流/越界报错；真机多 tap 验收待 Linux/KVM 环境）
