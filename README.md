@@ -31,6 +31,7 @@ src/minisweharness/
   host.py           # 宿主机信息 + run_manifest 默认形状
   guardrail.py      # H5 guardrail：并发上限 + 内存/磁盘下限接入判定
   scheduler.py      # H5 VM 池并行调度：槽位化 config 池 + 排队/拒绝，无静默超载
+  prepare.py        # 批量准备：traces → source store import + episode manifest 生成 + 映射表覆盖校验
   lifecycle.py      # VMLifecycle → vm_lifecycle.json（§6 规范）
   timestamps.py     # wall + monotonic 双时间戳（横向前提①）
 tests/              # 纯逻辑单测（伪造 proc 树 + 注入时钟，无需 VM/Linux）
@@ -264,6 +265,44 @@ guardrail 口径沿用 `gpu_tasks/container.py` 的 POLICY 思路：内存/磁�
 2. 宿主机内存/磁盘触下限时排队或拒绝，无静默超载（结果含 `rejected` 与原因，
    排队超时也记录）。
 
+## prepare：批量准备（import + manifest + 覆盖校验）
+
+把 ``<traces-dir>/<benchmark>/<task_id>/`` 下的全部 `trajectory.json`（兼容
+`runs/<run_id>/...` 嵌套布局，一 task 多 run 时每个 run 一条源 episode，多余
+run 加 `--rN` 后缀）批量 import 进按 benchmark 划分的 source store，并为每个
+(episode, attempt) 生成 harness episode manifest。store 内源 episode id 为
+``{benchmark}--{task_id}``（跨 attempt 共享一份源）；manifest 的 `episode_id`
+留空，harness 自动生成 ``{benchmark}--{task_id}--a{attempt}``，与 source_episode
+必然不同（避免 replay 在同 store 内自引用撞主键）。
+
+```bash
+# 先 dry-run 看报告（不写任何文件）：覆盖缺口会在起跑前暴露
+mini-swe-harness prepare --traces-dir mini-swe-traces --image-map tasks.jsonl \
+    --store-dir stores --manifest-dir manifests --dry-run
+
+# 正式执行（幂等，可反复跑；import 委托 mini-swe-agent 的 replay import）
+mini-swe-harness prepare --traces-dir mini-swe-traces --image-map tasks.jsonl \
+    --store-dir stores --manifest-dir manifests
+
+# 之后直接批量 run
+mini-swe-harness run --config vm_base.json --ip-mode third_octet \
+    --registry <harbor> --run-dir runs/batch-001 --image-map tasks.jsonl \
+    --manifest manifests/*.json --concurrency 4
+```
+
+报告（stdout JSON）含：`missing_image`（映射表缺条目的 task，不进 manifest）、
+`no_trajectory`（缺 trajectory.json 的目录）、`imported`/`existing`（幂等跳过）、
+`import_failed`（单条失败不拖垮批量，CLI 以非零退出）。`--skip-import` 只做
+校验与 manifest 生成；`--attempts N` 每 task 生成 N 份 attempt manifest；
+`--profile-digest` 写入源 episode metadata 与 manifest（A4 digest 校验）。
+
+### prepare 验收
+
+1. dry-run 报告 `missing_image` 与实际映射表缺口一致；
+2. 重复执行第二次全部落入 `existing`，store 无重复 episode；
+3. 生成的 manifest 能被 `run-episode`/`run` 直接消费（source_episode 在
+   store 内存在、episode_id 与 source_episode 不同）。
+
 ## 实施步骤（计划文档 §5.3）
 
 - [x] **H0 单 VM 冒烟**（2026-10-16 完成实现；按用户要求未做动态测试，真机验收待 Linux/KVM 环境）
@@ -272,4 +311,5 @@ guardrail 口径沿用 `gpu_tasks/container.py` 的 POLICY 思路：内存/磁�
 - [x] **H3 时钟校准 + 双层 join**（2026-10-16 完成实现；`clocksync.py` + `join.py` + episode 集成，假心跳/假 guest_events/假 vm_samples 桩冒烟通过，覆盖 offset 中位数/drift_ppm/去重/窗口过滤/差值比值 ≤1；真机校时与对账验收待 Linux/KVM 环境）
 - [x] **H4 基线 + reconciliation + 质量记录**（2026-10-16 完成实现；`baseline.py` + `quality.py` + `host.py` + episode 集成 + `baseline` 子命令，假 VM/假采样器/合成样本桩冒烟通过，覆盖速率/峰值/积分汇总、基线文件生成与 run_manifest 回写、超阈值/缺失/coverage 质量条目；真机空转基线验收待 Linux/KVM 环境）
 - [x] **H5 并行调度 + guardrail**（2026-10-16 完成实现；`guardrail.py` + `scheduler.py` + `run` 子命令，假 snapshot/假 run_episode_fn 桩冒烟通过，覆盖并发上限、内存/磁盘下限拒绝、排队后接入、排队超时、runner 异常落盘；真机多 VM 并发验收待 Linux/KVM 环境）
+- [x] **prepare 批量准备**（2026-10-19 完成实现；`prepare.py` + `prepare` 子命令，假 importer 桩冒烟覆盖扫描/覆盖校验/幂等/多 run 命名/失败隔离；已对 mini-swe-traces 真实数据 dry-run 验证：4678 条 trace、7 个 benchmark store、暴露 41 个 terminalworld 映射缺口；真实 import 端到端验证通过）
 - [x] **H5a 并发网络槽位**（2026-10-19 完成实现；`config.derive_slot_config` + scheduler config 池/槽位分配（done callback 回收）+ `run` 单 config 自动派生 + `make-configs` 子命令，桩冒烟覆盖槽位互斥/池冲突拒绝/槽池节流/越界报错；真机多 tap 验收待 Linux/KVM 环境）

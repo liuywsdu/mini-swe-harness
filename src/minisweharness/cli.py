@@ -22,6 +22,7 @@ from minisweharness.guardrail import GuardrailPolicy
 from minisweharness.images import DEFAULT_REGISTRY
 from minisweharness.images import HarborClient
 from minisweharness.manifest import EpisodeManifest
+from minisweharness.prepare import prepare
 from minisweharness.scheduler import run_episodes
 from minisweharness.sampler import DEFAULT_INTERVAL_SECONDS, VMMSampler
 from minisweharness.vm import run_h0_smoke
@@ -204,6 +205,31 @@ def _cmd_make_configs(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_prepare(args: argparse.Namespace) -> int:
+    """traces 目录批量准备：import 进 source store + 生成 episode manifest + 覆盖校验。"""
+    report = prepare(
+        args.traces_dir,
+        args.image_map,
+        args.store_dir,
+        args.manifest_dir,
+        attempts=args.attempts,
+        profile_digest=args.profile_digest,
+        skip_import=args.skip_import,
+        dry_run=args.dry_run,
+    )
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+    if report["missing_image"]:
+        print(
+            f"warning: {len(report['missing_image'])} task(s) missing from image map; "
+            "manifests were not generated for them",
+            file=sys.stderr,
+        )
+    if report["import_failed"]:
+        print(f"error: {len(report['import_failed'])} episode(s) failed to import", file=sys.stderr)
+        return 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mini-swe-harness", description=__doc__)
     parser.add_argument("-v", "--verbose", action="store_true", help="debug 日志")
@@ -276,6 +302,19 @@ def build_parser() -> argparse.ArgumentParser:
     make_configs.add_argument("--ip-mode", choices=["last_octet", "third_octet"], default="last_octet")
     make_configs.add_argument("--out-dir", required=True, help="槽位配置输出目录")
     make_configs.set_defaults(func=_cmd_make_configs)
+
+    prep = subcommands.add_parser(
+        "prepare", help="traces 目录批量准备：import 进 source store + 生成 episode manifest + 映射表覆盖校验"
+    )
+    prep.add_argument("--traces-dir", required=True, help="traces 根目录（<benchmark>/<task_id>/trajectory.json）")
+    prep.add_argument("--image-map", required=True, help="镜像映射表 JSONL（覆盖校验；tasks.jsonl 同构）")
+    prep.add_argument("--store-dir", required=True, help="source store 输出目录（每 benchmark 一份）")
+    prep.add_argument("--manifest-dir", required=True, help="episode manifest 输出目录")
+    prep.add_argument("--attempts", type=int, default=1, help="每个 task 生成的 attempt 份数（默认 1）")
+    prep.add_argument("--profile-digest", default="", help="写入源 episode metadata 与 manifest 的测量 profile digest")
+    prep.add_argument("--skip-import", action="store_true", help="只做覆盖校验/manifest 生成，不写 store")
+    prep.add_argument("--dry-run", action="store_true", help="只出报告，不写 store 与 manifest")
+    prep.set_defaults(func=_cmd_prepare)
     return parser
 
 

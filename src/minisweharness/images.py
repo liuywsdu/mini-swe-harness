@@ -92,10 +92,11 @@ class ImageMap:
                 raise MappingError(f"unknown image_map fields: {sorted(unknown)}")
             if not row.get("benchmark") or not row.get("docker_image"):
                 raise MappingError(f"benchmark/docker_image required: {row}")
+            # null/缺失统一归一为 ""（benchmark 级通配，见 tasks.jsonl 惯例）
             entries.append(
                 ImageEntry(
                     benchmark=row["benchmark"],
-                    task_id=row.get("task_id", ""),
+                    task_id=row.get("task_id") or "",
                     docker_image=row["docker_image"],
                 )
             )
