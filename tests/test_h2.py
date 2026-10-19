@@ -286,12 +286,14 @@ def test_replay_and_export_commands():
         environment_config_guest_path="/mnt/share/override.json",
     )
     joined = " ".join(command)
+    assert command[:4] == ["python3", "-m", "minisweagent.run.replay", "run"]
     assert "--store /mnt/share/store" in joined
     assert "--source src" in joined
     assert "--episode swebench--django__django-1--a0" in joined
     assert "--environment-config /mnt/share/override.json" in joined
     assert "--profile-digest digest123" in joined
     export = export_events_command("/mnt/share/store", "ep-1", "/mnt/share/guest_events.jsonl")
+    assert export[:4] == ["python3", "-m", "minisweagent.run.replay", "export-events"]
     assert "--output /mnt/share/guest_events.jsonl" in " ".join(export)
 
 
@@ -419,7 +421,7 @@ def test_run_episode_completed_flow(tmp_path: Path):
     assert record["image_override"]["environment_class"] == "docker"
     assert any("docker pull " in c and f"{DEFAULT_REGISTRY}/swebench/repo:v1" in c for c in calls)
     assert not any("docker tag " in c for c in calls)  # 主方案无 tag
-    assert any("run replay run" in c and "--environment-config" in c for c in calls)
+    assert any("minisweagent.run.replay run" in c and "--environment-config" in c for c in calls)
     for name in ("episode.json", "vm_lifecycle.json", "anchors.jsonl"):
         assert (episode_dir / name).is_file(), name
     assert (episode_dir / "shared" / "guest_events.jsonl").is_file()
@@ -520,7 +522,7 @@ def test_run_episode_failure_closes_anchor_window(tmp_path: Path):
     image_map_path = _image_map(tmp_path, [{"benchmark": "b", "task_id": "t", "docker_image": "b/repo"}])
 
     def execute(command: str, timeout: float) -> subprocess.CompletedProcess:
-        if "run replay run" in command:
+        if "minisweagent.run.replay run" in command:
             return subprocess.CompletedProcess(command, 1, "", "boom")
         return subprocess.CompletedProcess(command, 0, "", "")
 

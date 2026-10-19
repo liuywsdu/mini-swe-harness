@@ -122,7 +122,7 @@ mini-swe-harness run-episode \
   `user: N` → `run_args: ["--user", "N"]`，`runtime: "bounded Docker"` 等未知
   字段丢弃（禁止透传 trace 环境 dict），内容落 `episode.json.image_override`。
 - **注入**：SSH 后端以 `scp -r` 上传源 store、以 `scp` 上传 override，guest 内跑
-  `minisweagent run replay run --environment-config <override>`（mini 对 docker
+  `python -m minisweagent.run.replay run --environment-config <override>`（mini 对 docker
   executor 强制 `--pull=never`，命中本地 Harbor 名镜像）。
 - **完整性**：`session_snapshot.final` 存在才算 episode 有效；
   guest `export-events` 后通过 SCP 下载 store 与 `guest_events.jsonl`，导出

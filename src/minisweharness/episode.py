@@ -9,7 +9,7 @@
 4. 镜像预热（warm-up 阶段）：guest 内 ``docker pull <Harbor 全路径>``
    （override 名即 Harbor 名，无需 tag）并 inspect 验证；
 5. episode 注入：源 store/override 经 SCP 上传，guest 内
-   ``minisweagent run replay run --environment-config <override>``（mini 对
+   ``python -m minisweagent.run.replay run --environment-config <override>``（mini 对
    docker executor 强制 ``--pull=never``，命中本地 Harbor 名镜像）；
 6. 收尾校验：``session_snapshot.final`` 存在、导出 JSONL 行数与 store 一致；
 7. 落盘 §6 布局：episode.json / guest_events.jsonl / vm_samples.jsonl /
@@ -80,8 +80,6 @@ def build_replay_command(
         raise ValueError("H2 仅支持 replay；record 留待后续步骤")
     command = shlex.split(manifest.mini_executable) + [
         "run",
-        "replay",
-        "run",
         "--store",
         store_guest_path,
         "--source",
@@ -105,10 +103,14 @@ def build_replay_command(
     return command
 
 
-def export_events_command(store_guest_path: str, episode_id: str, output_guest_path: str) -> list[str]:
-    return shlex.split("python3 -m minisweagent") + [
-        "run",
-        "replay",
+def export_events_command(
+    store_guest_path: str,
+    episode_id: str,
+    output_guest_path: str,
+    *,
+    mini_executable: str = "python3 -m minisweagent.run.replay",
+) -> list[str]:
+    return shlex.split(mini_executable) + [
         "export-events",
         "--store",
         store_guest_path,
@@ -291,7 +293,17 @@ def run_episode(
             raise GuestStoreError(failure)
 
         # ---- 阶段 4：导出 + 完整性校验
-        execute(shlex.join(export_events_command(store_guest, episode_id, events_guest)), 120)
+        execute(
+            shlex.join(
+                export_events_command(
+                    store_guest,
+                    episode_id,
+                    events_guest,
+                    mini_executable=manifest.mini_executable,
+                )
+            ),
+            120,
+        )
         if ssh_transfer:
             vm.download_directory(store_guest, shared_dir / "store", timeout=300)
             vm.download_file(events_guest, shared_dir / "guest_events.jsonl")

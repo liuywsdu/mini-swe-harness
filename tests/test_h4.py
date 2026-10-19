@@ -250,7 +250,7 @@ def test_run_episode_records_quality_with_baseline(tmp_path: Path):
     episode_dir = tmp_path / "run" / "episodes" / "ep-h4"
 
     def execute(command: str, timeout: float) -> subprocess.CompletedProcess:
-        if "run replay run" in command:
+        if "minisweagent.run.replay run" in command:
             store = episode_dir / "shared" / "store"
             store.mkdir(parents=True, exist_ok=True)
             (store / "heartbeat.json").write_text(json.dumps({"wall_ts": 1_700_000_000.0, "monotonic_ts": 1000.0}))
