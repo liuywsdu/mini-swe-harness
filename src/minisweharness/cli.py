@@ -308,7 +308,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     prep.add_argument("--traces-dir", required=True, help="traces 根目录（<benchmark>/<task_id>/trajectory.json）")
     prep.add_argument("--image-map", required=True, help="镜像映射表 JSONL（覆盖校验；tasks.jsonl 同构）")
-    prep.add_argument("--store-dir", required=True, help="source store 输出目录（每 benchmark 一份）")
+    prep.add_argument("--store-dir", required=True, help="source store 输出目录（每源 episode 一份：<benchmark>/<source_episode_id>/）")
     prep.add_argument("--manifest-dir", required=True, help="episode manifest 输出目录")
     prep.add_argument("--attempts", type=int, default=1, help="每个 task 生成的 attempt 份数（默认 1）")
     prep.add_argument("--profile-digest", default="", help="写入源 episode metadata 与 manifest 的测量 profile digest")

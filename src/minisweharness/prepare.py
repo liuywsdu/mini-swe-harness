@@ -5,18 +5,26 @@
 
     <traces-dir>/<benchmark>/<task_id>/trajectory.json
 
+**store 布局（每源 episode 一份）**：``<store-dir>/<benchmark>/<source_episode_id>/``
+——每个 store 只含一条源 episode。episode 注入（``episode.py``）会把
+``manifest.source_store`` 整个上传进 guest（VM 每 episode 新建即销毁，无法复用），
+per-episode store 保证每条 episode 只搬运自己需要的数据（KB~MB 级），避免全量
+benchmark store（GB 级、海量小文件）反复 scp 超时。
+
 处理流程（幂等，可反复执行）：
 
 1. 扫描候选 episode（缺 ``trajectory.json`` 的目录记 ``no_trajectory``）；
 2. 映射表覆盖校验（复用 ``images.ImageMap``，精确匹配 → benchmark 通配回退）；
    缺失条目记 ``missing_image`` 并不进 manifest（harness 起跑前报错口径一致）；
-3. 按 benchmark 一个 source store（``<store-dir>/<benchmark>``），episode id 为
-   ``{benchmark}--{task_id}``（跨 attempt 共享一份源）。已存在的 episode 跳过
-   （``existing``）；import 失败的记 ``import_failed`` 并进报告，不中断批量；
+3. 每个源 episode 一个 source store（``<store-dir>/<benchmark>/<source_episode_id>``；
+   episode id 为 ``{benchmark}--{task_id}``，多 run 加 ``--rN`` 后缀；跨 attempt
+   共享一份源）。已存在的 episode 跳过（``existing``）；import 失败的记
+   ``import_failed`` 并进报告，不中断批量；
 4. 每个 (episode, attempt) 生成一份 harness episode manifest
    （``<manifest-dir>/{benchmark}--{task_id}--a{attempt}.json``）：
-   ``source_episode`` 指向 store 内源 episode，``episode_id`` 留空由 harness
-   自动生成 ``{benchmark}--{task_id}--a{attempt}``——与 source_episode 必然不同，
+   ``source_episode`` 指向 store 内源 episode，``source_store`` 指向该
+   per-episode store 目录，``episode_id`` 留空由 harness 自动生成
+   ``{benchmark}--{task_id}--a{attempt}``——与 source_episode 必然不同，
    避免 replay 在同一 store 内自引用（create_episode 主键冲突）。
 
 import 本身委托 mini-swe-agent 的 ``replay import``（懒加载；宿主未安装 mini
@@ -230,19 +238,20 @@ def prepare(
         "manifests": [],
     }
 
-    # 按 benchmark 分组处理（store 每 benchmark 一份）
+    report["store_layout"] = "per_episode"
+
+    # 按 benchmark 分组处理；store 每源 episode 一份（注入只上传本 episode 需要的数据）
     by_benchmark: dict[str, list[dict]] = {}
     for candidate in candidates:
         by_benchmark.setdefault(candidate["benchmark"], []).append(candidate)
 
     for benchmark, group in sorted(by_benchmark.items()):
-        store_path = store_dir / benchmark
-        report["stores"][benchmark] = str(store_path.resolve())
+        report["stores"][benchmark] = str((store_dir / benchmark).resolve())
         for candidate in group:
-            key = f"{candidate['benchmark']}/{candidate['task_id']}"
             episode_id = source_episode_id(
                 candidate["benchmark"], candidate["task_id"], candidate.get("run", 0)
             )
+            store_path = store_dir / benchmark / episode_id
 
             # 覆盖校验：缺失条目不进 manifest（起跑前报错口径，见 images.MappingError）
             if image_map.lookup(candidate["benchmark"], candidate["task_id"]) is None:

@@ -124,9 +124,13 @@ def test_prepare_imports_and_writes_manifests(layout):
     assert report["missing_image"] == []
     assert len(report["manifests"]) == 3
 
-    # store 按 benchmark 划分，identity metadata 写入
-    assert set(importer.stores) == {layout["store_dir"] / "benchA", layout["store_dir"] / "benchB"}
-    assert importer.stores[layout["store_dir"] / "benchA"]["benchA--t1"]["profile_digest"] == "digest-1"
+    # store 每源 episode 一份（注入只上传该 episode 需要的数据），identity metadata 写入
+    assert set(importer.stores) == {
+        layout["store_dir"] / "benchA" / "benchA--t1",
+        layout["store_dir"] / "benchA" / "benchA--t2",
+        layout["store_dir"] / "benchB" / "benchB--t1",
+    }
+    assert importer.stores[layout["store_dir"] / "benchA" / "benchA--t1"]["benchA--t1"]["profile_digest"] == "digest-1"
 
     # manifest：episode_id 留空（harness 自动生成，与 source_episode 区分）
     manifest_path = layout["manifest_dir"] / "benchA--t1--a0.json"
@@ -135,7 +139,7 @@ def test_prepare_imports_and_writes_manifests(layout):
     assert manifest.episode_id == ""
     assert manifest.resolved_episode_id == "benchA--t1--a0"  # 与 source 必然不同
     assert manifest.mode == "replay"
-    assert manifest.source_store == str((layout["store_dir"] / "benchA").resolve())
+    assert manifest.source_store == str((layout["store_dir"] / "benchA" / "benchA--t1").resolve())
     assert manifest.trajectory.endswith("benchA/t1/trajectory.json")
     assert manifest.profile_digest == "digest-1"
 
@@ -147,6 +151,18 @@ def test_prepare_is_idempotent(layout):
     assert second["imported"] == []
     assert sorted(second["existing"]) == ["benchA--t1", "benchA--t2", "benchB--t1"]
     assert len(second["manifests"]) == 3  # manifest 覆写重写，幂等
+
+
+def test_prepare_store_layout_is_per_episode(layout):
+    """每个 store 只含自己的源 episode：episode 注入上传量与 task 总数解耦。"""
+    importer = FakeStoreImporter()
+    report = _run(importer, layout)
+    assert report["store_layout"] == "per_episode"
+    for store_path, episodes in importer.stores.items():
+        assert len(episodes) == 1, f"{store_path} 应只含一条源 episode"
+        assert store_path.name == next(iter(episodes)), "store 目录名即源 episode id"
+    # 不同 benchmark 不共享 store
+    assert layout["store_dir"] / "benchA" / "benchB--t1" not in importer.stores
 
 
 def test_prepare_missing_image_map_entry_excluded(layout):
@@ -224,6 +240,7 @@ def test_nested_runs_layout_multi_run_naming(tmp_path: Path):
     assert first.episode_id == ""
     second = EpisodeManifest.from_json(tmp_path / "manifests" / "benchA--t1--r1--a0.json")
     assert second.source_episode == "benchA--t1--r1"
+    assert second.source_store == str((tmp_path / "stores" / "benchA" / "benchA--t1--r1").resolve())
     assert second.episode_id == "benchA--t1--r1--a0"  # 带 attempt，episode 目录唯一
     # 不同 run 指向不同 trajectory 文件
     assert first.trajectory != second.trajectory

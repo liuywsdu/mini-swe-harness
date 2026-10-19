@@ -269,11 +269,17 @@ guardrail 口径沿用 `gpu_tasks/container.py` 的 POLICY 思路：内存/磁�
 
 把 ``<traces-dir>/<benchmark>/<task_id>/`` 下的全部 `trajectory.json`（兼容
 `runs/<run_id>/...` 嵌套布局，一 task 多 run 时每个 run 一条源 episode，多余
-run 加 `--rN` 后缀）批量 import 进按 benchmark 划分的 source store，并为每个
-(episode, attempt) 生成 harness episode manifest。store 内源 episode id 为
-``{benchmark}--{task_id}``（跨 attempt 共享一份源）；manifest 的 `episode_id`
-留空，harness 自动生成 ``{benchmark}--{task_id}--a{attempt}``，与 source_episode
-必然不同（避免 replay 在同 store 内自引用撞主键）。
+run 加 `--rN` 后缀）批量 import 进 source store，并为每个 (episode, attempt)
+生成 harness episode manifest。
+
+**store 布局为每源 episode 一份**：``<store-dir>/<benchmark>/<source_episode_id>/``，
+每个 store 只含一条源 episode（id 为 ``{benchmark}--{task_id}``，多 run 加
+`--rN`；跨 attempt 共享一份源）。episode 注入会把 ``manifest.source_store``
+整个上传进 guest（VM 每 episode 新建即销毁，无法复用），per-episode store 让
+每条 episode 只搬运自己需要的数据（KB~MB 级），避免全量 benchmark store
+（GB 级、海量小文件）反复 scp 超时。manifest 的 `episode_id`留空，harness 自动
+生成 ``{benchmark}--{task_id}--a{attempt}``，与 source_episode 必然不同（避免
+replay 在同 store 内自引用撞主键）。
 
 ```bash
 # 先 dry-run 看报告（不写任何文件）：覆盖缺口会在起跑前暴露
@@ -290,11 +296,12 @@ mini-swe-harness run --config vm_base.json --ip-mode third_octet \
     --manifest manifests/*.json --concurrency 4
 ```
 
-报告（stdout JSON）含：`missing_image`（映射表缺条目的 task，不进 manifest）、
-`no_trajectory`（缺 trajectory.json 的目录）、`imported`/`existing`（幂等跳过）、
-`import_failed`（单条失败不拖垮批量，CLI 以非零退出）。`--skip-import` 只做
-校验与 manifest 生成；`--attempts N` 每 task 生成 N 份 attempt manifest；
-`--profile-digest` 写入源 episode metadata 与 manifest（A4 digest 校验）。
+报告（stdout JSON）含：`store_layout`（固定 `per_episode`）、`missing_image`
+（映射表缺条目的 task，不进 manifest）、`no_trajectory`（缺 trajectory.json 的
+目录）、`imported`/`existing`（幂等跳过）、`import_failed`（单条失败不拖垮批量，
+CLI 以非零退出）。`--skip-import` 只做校验与 manifest 生成；`--attempts N` 每
+task 生成 N 份 attempt manifest；`--profile-digest` 写入源 episode metadata 与
+manifest（A4 digest 校验）。
 
 ### prepare 验收
 
