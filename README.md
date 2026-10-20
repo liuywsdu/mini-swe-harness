@@ -316,6 +316,13 @@ CLI 以非零退出）。`--skip-import` 只做校验与 manifest 生成；`--at
 task 生成 N 份 attempt manifest；`--profile-digest` 写入源 episode metadata 与
 manifest（A4 digest 校验）。
 
+**replay timing 定参**（`--timing`，默认 `auto`）：外部 trace 无逐 call 时长时，
+mini replay 的默认 `--timing recorded` 会报
+`Source has incomplete calls or missing durations`。`auto` 在 import 后读
+store 的 `calls` 表判定：缺 duration 的 episode 在 manifest 里写入
+`extra_replay_args: ["--timing", "instant"]`（不等模型延迟），齐全的不加参数
+（走 `recorded`）；`recorded`/`instant`/`simulated` 可强制全部 episode。
+
 ### prepare 验收
 
 1. dry-run 报告 `missing_image` 与实际映射表缺口一致；

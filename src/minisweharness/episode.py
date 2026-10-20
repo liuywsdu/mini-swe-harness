@@ -108,7 +108,8 @@ def _probe_mini_agent_importable(execute, *, python_cmd: str) -> None:
             "指向正确的解释器"
         )
         raise GuestStoreError(f"minisweagent not importable in guest:\n{output[-1500:]}\n{hint}")
-    logger.info("guest minisweagent import probe: %s", output.splitlines()[-1] if output else "OK")
+    spec_line = next((line for line in output.splitlines() if line.startswith("SPEC ")), "")
+    logger.info("guest minisweagent import probe: %s", spec_line or "OK")
 
 
 def build_replay_command(

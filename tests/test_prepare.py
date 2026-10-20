@@ -289,3 +289,82 @@ def test_prepare_cli_exit_nonzero_on_import_failure(layout, monkeypatch, capsys)
     )
     assert rc == 1
     assert "failed to import" in capsys.readouterr().err
+
+
+# ------------------------------------------------------------------ replay timing 定参
+
+
+def _sqlite_store_with_calls(root: Path, episode_id: str, durations: list) -> Path:
+    """真实最小 index.sqlite3：calls 表按 durations 造行（None=缺 duration）。"""
+    root.mkdir(parents=True, exist_ok=True)
+    import sqlite3
+
+    db = sqlite3.connect(root / "index.sqlite3")
+    db.execute(
+        "CREATE TABLE calls(episode TEXT, round INT, attempt INT, request TEXT, "
+        "response TEXT, error TEXT, duration REAL, status TEXT, started REAL)"
+    )
+    for i, duration in enumerate(durations, start=1):
+        db.execute(
+            "INSERT INTO calls VALUES(?,?,?,?,?,?,?,?,?)",
+            (episode_id, i, 0, "{}", None, None, duration, "ok" if duration is not None else "pending", 0.0),
+        )
+    db.commit()
+    db.close()
+    return root
+
+
+def test_source_has_missing_durations(tmp_path: Path):
+    from minisweharness.prepare import source_has_missing_durations
+
+    complete = _sqlite_store_with_calls(tmp_path / "complete", "ep", [1.0, 2.0])
+    assert source_has_missing_durations(complete, "ep") is False
+    incomplete = _sqlite_store_with_calls(tmp_path / "incomplete", "ep", [1.0, None])
+    assert source_has_missing_durations(incomplete, "ep") is True
+    assert source_has_missing_durations(tmp_path / "no-db", "ep") is True  # 无从判断按缺失处理
+
+
+def test_prepare_timing_auto_writes_instant_only_when_durations_missing(layout):
+    """timing=auto：外部 trace（duration 全 NULL）→ manifest 带 --timing instant。"""
+    from minisweharness.prepare import timing_extra_args
+
+    incomplete = _sqlite_store_with_calls(layout["store_dir"] / "benchA" / "benchA--t1", "benchA--t1", [None, None])
+    assert timing_extra_args("auto", incomplete, "benchA--t1") == ["--timing", "instant"]
+
+    complete = _sqlite_store_with_calls(layout["store_dir"] / "benchA" / "benchA--t2", "benchA--t2", [1.5, 2.5])
+    assert timing_extra_args("auto", complete, "benchA--t2") == []
+
+
+def test_prepare_timing_explicit_overrides_auto(layout):
+    from minisweharness.prepare import timing_extra_args
+
+    store = _sqlite_store_with_calls(layout["store_dir"] / "benchA" / "benchA--t1", "benchA--t1", [None])
+    assert timing_extra_args("recorded", store, "benchA--t1") == []
+    assert timing_extra_args("simulated", store, "benchA--t1") == ["--timing", "simulated"]
+    with pytest.raises(ValueError, match="timing"):
+        timing_extra_args("bogus", store, "benchA--t1")
+
+
+def test_prepare_manifest_carries_timing_args(layout):
+    """端到端：auto + 缺 duration 的 store → 生成的 manifest.extra_replay_args 带 --timing instant。"""
+    # importer 落真实 sqlite：t1 缺 duration、t2 齐全，auto 应分别给出 instant / 无参数
+    class SqliteWritingImporter(FakeStoreImporter):
+        DURATIONS = {"benchA--t1": [None, None], "benchA--t2": [1.0], "benchB--t1": [None]}
+
+        def import_episode(self, trajectory, store_path, episode_id, **kwargs):
+            result = super().import_episode(trajectory, store_path, episode_id, **kwargs)
+            _sqlite_store_with_calls(Path(store_path), episode_id, self.DURATIONS[episode_id])
+            return result
+
+    prepare(
+        layout["traces"],
+        layout["image_map"],
+        layout["store_dir"],
+        layout["manifest_dir"],
+        importer=SqliteWritingImporter(),
+        timing="auto",
+    )
+    manifest = EpisodeManifest.from_json(layout["manifest_dir"] / "benchA--t1--a0.json")
+    assert manifest.extra_replay_args == ["--timing", "instant"]
+    manifest_t2 = EpisodeManifest.from_json(layout["manifest_dir"] / "benchA--t2--a0.json")
+    assert manifest_t2.extra_replay_args == []  # duration 齐全 → mini 默认 recorded

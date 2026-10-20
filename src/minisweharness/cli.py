@@ -237,6 +237,7 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
         profile_digest=args.profile_digest,
         skip_import=args.skip_import,
         dry_run=args.dry_run,
+        timing=args.timing,
     )
     print(json.dumps(report, indent=2, ensure_ascii=False))
     if report["missing_image"]:
@@ -351,6 +352,12 @@ def build_parser() -> argparse.ArgumentParser:
     prep.add_argument("--profile-digest", default="", help="写入源 episode metadata 与 manifest 的测量 profile digest")
     prep.add_argument("--skip-import", action="store_true", help="只做覆盖校验/manifest 生成，不写 store")
     prep.add_argument("--dry-run", action="store_true", help="只出报告，不写 store 与 manifest")
+    prep.add_argument(
+        "--timing",
+        choices=["auto", "recorded", "instant", "simulated"],
+        default="auto",
+        help="replay --timing 定参（默认 auto：源缺 duration 时 instant，齐全时 recorded）",
+    )
     prep.set_defaults(func=_cmd_prepare)
     return parser
 

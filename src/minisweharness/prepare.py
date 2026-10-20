@@ -34,6 +34,8 @@ import 本身委托 mini-swe-agent 的 ``replay import``（懒加载；宿主未
 from __future__ import annotations
 
 import json
+import sqlite3
+from contextlib import closing
 from dataclasses import asdict
 from pathlib import Path
 from typing import Protocol
@@ -167,6 +169,42 @@ def source_episode_id(benchmark: str, task_id: str, run: int = 0) -> str:
     return base if run == 0 else f"{base}--r{run}"
 
 
+VALID_TIMINGS = ("auto", "recorded", "instant", "simulated")
+
+
+def source_has_missing_durations(store_path: Path, episode_id: str) -> bool:
+    """源 episode 的 calls 表是否有 pending/缺 duration 的轮次（replay --timing recorded 的前置条件）。
+
+    直接读 ``index.sqlite3``（stdlib sqlite3，与 store.GuestStore 同口径）；
+    数据库不存在时按缺失处理（无从判断，宁可保守）。
+    """
+    database = Path(store_path) / "index.sqlite3"
+    if not database.is_file():
+        return True
+    with closing(sqlite3.connect(str(database), timeout=30)) as db:
+        row = db.execute(
+            "SELECT COUNT(*) FROM calls WHERE episode=? AND attempt=0 "
+            "AND (status='pending' OR duration IS NULL)",
+            (episode_id,),
+        ).fetchone()
+    return row[0] > 0
+
+
+def timing_extra_args(timing: str, store_path: Path, episode_id: str) -> list[str]:
+    """把 --timing 选择转成 manifest.extra_replay_args。
+
+    ``auto``（默认）：源缺 duration 时回放 ``instant``（不等模型延迟），
+    齐全时不加参数（mini 默认 ``recorded``）；``recorded`` 不加参数。
+    """
+    if timing not in VALID_TIMINGS:
+        raise ValueError(f"timing must be one of {VALID_TIMINGS}: {timing}")
+    if timing == "recorded":
+        return []
+    if timing == "auto":
+        return ["--timing", "instant"] if source_has_missing_durations(store_path, episode_id) else []
+    return ["--timing", timing]
+
+
 def build_manifest(
     candidate: dict,
     *,
@@ -175,6 +213,7 @@ def build_manifest(
     profile_digest: str = "",
     episode_timeout_seconds: float = DEFAULT_EPISODE_TIMEOUT_SECONDS,
     mini_executable: str = DEFAULT_MINI_EXECUTABLE,
+    extra_replay_args: list | None = None,
 ) -> EpisodeManifest:
     """episode manifest：episode_id 留空 → harness 自动 {benchmark}--{task_id}--a{attempt}。
 
@@ -193,6 +232,7 @@ def build_manifest(
         trajectory=str(candidate["trajectory"].resolve()),
         mini_executable=mini_executable,
         episode_timeout_seconds=episode_timeout_seconds,
+        extra_replay_args=list(extra_replay_args or []),
         # run>0 显式 episode_id 带 attempt，保证多 attempt 时 episode 目录唯一
         episode_id="" if run == 0 else f"{candidate['benchmark']}--{candidate['task_id']}--r{run}--a{attempt}",
     )
@@ -208,6 +248,7 @@ def prepare(
     profile_digest: str = "",
     skip_import: bool = False,
     dry_run: bool = False,
+    timing: str = "auto",
     importer: StoreImporter | None = None,
     episode_timeout_seconds: float = DEFAULT_EPISODE_TIMEOUT_SECONDS,
     mini_executable: str = DEFAULT_MINI_EXECUTABLE,
@@ -215,6 +256,8 @@ def prepare(
     """批量准备；返回报告 dict（也作为 CLI stdout）。"""
     if attempts < 1:
         raise ValueError(f"attempts must be >= 1: {attempts}")
+    if timing not in VALID_TIMINGS:
+        raise ValueError(f"timing must be one of {VALID_TIMINGS}: {timing}")
     importer = importer or MiniStoreImporter()
     store_dir = Path(store_dir)
     manifest_dir = Path(manifest_dir)
@@ -282,6 +325,11 @@ def prepare(
                     report["import_failed"].append({"episode": episode_id, "error": f"{type(exc).__name__}: {exc}"})
                     continue
 
+            # --timing 定参：auto 依据导入后的 store 判定（dry-run 无从判定，不加参数）
+            extra_args: list = []
+            if not dry_run:
+                extra_args = timing_extra_args(timing, store_path, episode_id)
+
             # manifest 每 attempt 一份
             for attempt in range(attempts):
                 manifest = build_manifest(
@@ -291,6 +339,7 @@ def prepare(
                     profile_digest=profile_digest,
                     episode_timeout_seconds=episode_timeout_seconds,
                     mini_executable=mini_executable,
+                    extra_replay_args=extra_args,
                 )
                 path = manifest_dir / f"{manifest.resolved_episode_id}.json"
                 if not dry_run:
