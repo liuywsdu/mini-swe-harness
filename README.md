@@ -106,7 +106,8 @@ mini-swe-harness run-episode \
     --config <真机 VM 配置>.json \
     --run-dir runs/h2-001 \
     --registry harbor.internal \
-    --image-map examples/image_map.jsonl
+    --image-map examples/image_map.jsonl \
+    --mini-agent-dir /path/to/mini-swe-agent/src   # guest 未预装 mini-swe-agent 时
 ```
 
 流程要点（计划文档 §5.3 H2 / §5.4）：
@@ -125,6 +126,11 @@ mini-swe-harness run-episode \
 - **注入**：SSH 后端以 `scp -r` 上传源 store、以 `scp` 上传 override，guest 内跑
   `python -m minisweagent.run.replay run --environment-config <override>`（mini 对 docker
   executor 强制 `--pull=never`，命中本地 Harbor 名镜像）。
+- **mini-swe-agent 供给**：replay 在 guest 内执行，guest 必须能 import
+  `minisweagent`。两种供给方式（二选一）：把它**预装进 guest 镜像**（推荐，零
+  per-episode 开销）；或传 `--mini-agent-dir <mini 仓库的 src/>`，harness 在注入
+  阶段把该目录 scp 进 guest 并 `pip install`（依赖经 guest 网络解析，guest 需有
+  pip 与 PyPI 访问；失败给出明确报错）。
 - **完整性**：`session_snapshot.final` 存在才算 episode 有效；
   guest `export-events` 后通过 SCP 下载 store 与 `guest_events.jsonl`，导出
   产物行数必须与下载后的 store 行数一致。
@@ -234,6 +240,10 @@ mini-swe-harness run-episode --manifest <真机 manifest>.json --config <真机 
 episode.json / run_manifest 落 ``slot_index`` 与 ``vm_tap_device``/
 ``vm_guest_ip``/``vm_guest_mac``，事后可把测量数据对回具体 tap/IP。
 
+``--manifest`` 可多次传入，且每次可空格分隔多个文件（shell 通配符
+``--manifest manifests/*.json`` 直接可用）；也可用 ``--manifest-dir <dir>`` 一次
+加入目录内全部 ``*.json``：
+
 ```bash
 # 一次性：生成槽位配置 + 打印宿主机 tap/bridge 准备命令（在宿主机执行输出的命令）
 mini-swe-harness make-configs --base vm_base.json --slots 4 \
@@ -244,7 +254,7 @@ mini-swe-harness run \
     --config configs/vm_config.slot0.json --config configs/vm_config.slot1.json \
     --run-dir runs/h5-001 \
     --image-map examples/image_map.jsonl \
-    --manifest m1.json --manifest m2.json --manifest m3.json \
+    --manifest m1.json m2.json m3.json \
     --concurrency 2 --memory-floor 12 --disk-floor 50
 
 # 或：单份 config 自动派生（等价于上面 make-configs + 多份 --config）
@@ -290,10 +300,10 @@ mini-swe-harness prepare --traces-dir mini-swe-traces --image-map tasks.jsonl \
 mini-swe-harness prepare --traces-dir mini-swe-traces --image-map tasks.jsonl \
     --store-dir stores --manifest-dir manifests
 
-# 之后直接批量 run
+# 之后直接批量 run（串行用 --concurrency 1；--manifest-dir 加入目录内全部 manifest）
 mini-swe-harness run --config vm_base.json --ip-mode third_octet \
     --registry <harbor> --run-dir runs/batch-001 --image-map tasks.jsonl \
-    --manifest manifests/*.json --concurrency 4
+    --manifest-dir manifests --concurrency 4
 ```
 
 报告（stdout JSON）含：`store_layout`（固定 `per_episode`）、`missing_image`

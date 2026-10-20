@@ -10,7 +10,9 @@
    （override 名即 Harbor 名，无需 tag）并 inspect 验证；
 5. episode 注入：源 store/override 经 SCP 上传，guest 内
    ``python -m minisweagent.run.replay run --environment-config <override>``（mini 对
-   docker executor 强制 ``--pull=never``，命中本地 Harbor 名镜像）；
+   docker executor 强制 ``--pull=never``，命中本地 Harbor 名镜像）；guest 未预装
+   mini-swe-agent 时传 ``mini_agent_dir``（含 minisweagent 包的目录，即 mini 仓库的
+   ``src/``），先 SCP 上传再 guest 内 ``pip install``；
 6. 收尾校验：``session_snapshot.final`` 存在、导出 JSONL 行数与 store 一致；
 7. 落盘 §6 布局：episode.json / guest_events.jsonl / vm_samples.jsonl /
    vm_lifecycle.json / anchors.jsonl，run 根目录写 run_manifest.json（含
@@ -66,6 +68,41 @@ logger = logging.getLogger("minisweharness.episode")
 ExecFn = Callable[[str, float], subprocess.CompletedProcess]
 # vm_factory(config, vm_id, keep_runtime_dir) -> VM 句柄；缺省 SingleVM（可注入假 VM 测试）
 VMFactory = Callable[[VMConfig, str, bool], "SingleVM"]
+
+
+MINI_AGENT_GUEST_DIR = "/opt/mini-swe-agent"
+
+
+def _install_mini_agent(vm, execute, mini_agent_dir, ssh_transfer, shared_dir, guest_share) -> None:
+    """把宿主机 mini-swe-agent 源码装进 guest（``pip install``，依赖经 guest 网络解析）。
+
+    供 guest 镜像未预装 mini-swe-agent 时使用；镜像已预装则不要传 ``mini_agent_dir``。
+    ``mini_agent_dir`` 必须是含 ``minisweagent`` 包的目录（mini 仓库的 ``src/``）。
+    """
+    source = Path(mini_agent_dir)
+    if not (source / "minisweagent" / "__init__.py").is_file():
+        raise ValueError(
+            f"mini_agent_dir 必须是包含 minisweagent 包的目录（mini-swe-agent 的 src/）：{source}"
+        )
+    if ssh_transfer:
+        vm.upload_directory(source, MINI_AGENT_GUEST_DIR, timeout=300)
+        guest_src = MINI_AGENT_GUEST_DIR
+    else:
+        destination = shared_dir / "mini-agent"
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.copytree(source, destination)
+        guest_src = f"{guest_share}/mini-agent"
+    result = execute(
+        f"python3 -m pip install --disable-pip-version-check --no-input {shlex.quote(guest_src)}",
+        600,
+    )
+    if result.returncode != 0:
+        output = (result.stdout + result.stderr)[-2000:]
+        raise GuestStoreError(
+            f"pip install mini-swe-agent in guest failed ({result.returncode}): {output}; "
+            "guest 需有 pip 与 PyPI 网络，或将 mini-swe-agent 预装进 guest 镜像（不传 --mini-agent-dir）"
+        )
 
 
 def build_replay_command(
@@ -137,6 +174,7 @@ def run_episode(
     baseline_profile_id: str | None = None,
     thresholds: QualityThresholds | None = None,
     slot_index: int | None = None,
+    mini_agent_dir: str | Path | None = None,
 ) -> dict:
     """跑一个 episode；返回 episode.json 记录。异常时尽力落盘 status=failed。"""
     if bool(registry_username) != bool(registry_password):
@@ -273,6 +311,10 @@ def run_episode(
         (shared_dir / "override.json").write_text(json.dumps(override, indent=2) + "\n")
         if ssh_transfer:
             vm.upload_file(shared_dir / "override.json", override_guest)
+
+        # ---- 阶段 2b：mini-swe-agent 代码供给（guest 镜像未预装时）
+        if mini_agent_dir:
+            _install_mini_agent(vm, execute, mini_agent_dir, ssh_transfer, shared_dir, guest_share)
 
         # ---- 阶段 3：episode 测量窗口（replay）
         heartbeat_guest = f"{store_guest}/heartbeat.json"

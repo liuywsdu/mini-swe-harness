@@ -91,6 +91,7 @@ def _cmd_run_episode(args: argparse.Namespace) -> int:
         registry_username=username,
         registry_password=password,
         keep_runtime_dir=args.keep_runtime_dir,
+        mini_agent_dir=args.mini_agent_dir or None,
     )
     print(json.dumps(record, indent=2, ensure_ascii=False))
     return 0 if record["status"] == "completed" else 1
@@ -109,8 +110,19 @@ def _cmd_baseline(args: argparse.Namespace) -> int:
     return 0
 
 
+def _manifest_paths(args: argparse.Namespace) -> list[str]:
+    """--manifest 可多次且每次可空格分隔多个；--manifest-dir 追加目录内全部 *.json。"""
+    paths = [path for group in (args.manifest or []) for path in group]
+    if args.manifest_dir:
+        paths.extend(sorted(str(p) for p in Path(args.manifest_dir).glob("*.json")))
+    return paths
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
-    episodes = [EpisodeManifest.from_json(path) for path in args.manifest]
+    manifest_paths = _manifest_paths(args)
+    if not manifest_paths:
+        raise ValueError("no manifests: pass --manifest <file...> and/or --manifest-dir <dir>")
+    episodes = [EpisodeManifest.from_json(path) for path in manifest_paths]
     policy = GuardrailPolicy(
         max_concurrency=args.concurrency,
         host_available_memory_floor_gib=args.memory_floor,
@@ -149,6 +161,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         registry_username=username,
         registry_password=password,
         keep_runtime_dir=args.keep_runtime_dir,
+        mini_agent_dir=args.mini_agent_dir or None,
     )
     for record in results:
         print(json.dumps(record, ensure_ascii=False))
@@ -257,6 +270,11 @@ def build_parser() -> argparse.ArgumentParser:
     episode.add_argument("--registry", default=DEFAULT_REGISTRY, help="Harbor registry 前缀")
     episode.add_argument("--image-map", required=True, help="镜像映射表 JSONL（§5.4）")
     episode.add_argument("--keep-runtime-dir", action="store_true")
+    episode.add_argument(
+        "--mini-agent-dir",
+        default="",
+        help="宿主机 mini-swe-agent 源码目录（含 minisweagent 包，即其 src/）；guest 未预装时上传并 pip install",
+    )
     episode.set_defaults(func=_cmd_run_episode)
 
     baseline = subcommands.add_parser("baseline", help="H4 空 VM 空转基线 → baseline_<profile_id>.json")
@@ -283,7 +301,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--run-dir", required=True, help="run 输出目录（§6 布局）")
     run.add_argument("--image-map", required=True, help="镜像映射表 JSONL（§5.4）")
-    run.add_argument("--manifest", action="append", required=True, help="episode manifest JSON（可多次）")
+    run.add_argument(
+        "--manifest",
+        action="append",
+        nargs="+",
+        help="episode manifest JSON（可多次；每次可空格分隔多个文件）",
+    )
+    run.add_argument("--manifest-dir", default="", help="manifest 目录：其中全部 *.json 加入 episode 矩阵")
     run.add_argument("--registry", default=DEFAULT_REGISTRY)
     run.add_argument("--concurrency", type=int, default=1, help="同时运行的 VM 数上限")
     run.add_argument("--memory-floor", type=float, default=12.0, help="宿主机可用内存下限 GiB")
@@ -292,6 +316,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--poll", type=float, default=1.0, help="guardrail 轮询周期秒")
     run.add_argument("--timeout", type=float, default=600.0, help="排队最长等待秒")
     run.add_argument("--keep-runtime-dir", action="store_true")
+    run.add_argument(
+        "--mini-agent-dir",
+        default="",
+        help="宿主机 mini-swe-agent 源码目录（含 minisweagent 包，即其 src/）；guest 未预装时上传并 pip install",
+    )
     run.set_defaults(func=_cmd_run)
 
     make_configs = subcommands.add_parser(

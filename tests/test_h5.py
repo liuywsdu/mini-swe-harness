@@ -243,3 +243,33 @@ def test_run_episodes_throttles_to_pool_size(tmp_path: Path):
         run_episode_fn=run_fn,
     )
     assert max_active == 2
+
+
+# ------------------------------------------------------------------ CLI 批量 manifest
+
+
+def test_run_manifest_arg_accepts_multiple_files_per_flag(tmp_path: Path):
+    """--manifest 每次可空格分隔多个文件，也可多次传入；--manifest-dir 追加目录。"""
+    from minisweharness.cli import _manifest_paths, build_parser
+
+    for name in ("a.json", "b.json", "c.json"):
+        (tmp_path / name).write_text("{}")
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    for name in ("d.json", "e.json"):
+        (sub / name).write_text("{}")
+
+    base = ["run", "--config", "vm.json", "--run-dir", "runs/x", "--image-map", "tasks.jsonl"]
+    parser = build_parser()
+    args = parser.parse_args(
+        base + ["--manifest", "a.json", "b.json", "--manifest", "c.json", "--manifest-dir", str(sub)]
+    )
+    assert _manifest_paths(args) == ["a.json", "b.json", "c.json", str(sub / "d.json"), str(sub / "e.json")]
+
+    # 单独 --manifest-dir 也合法（--manifest 不再 required）
+    args = parser.parse_args(base + ["--manifest-dir", str(sub)])
+    assert _manifest_paths(args) == [str(sub / "d.json"), str(sub / "e.json")]
+
+    # 两者都不给 → 空列表由 _cmd_run 显式报错
+    args = parser.parse_args(base)
+    assert _manifest_paths(args) == []

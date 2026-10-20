@@ -385,6 +385,78 @@ def _source_store(tmp_path: Path, episode_id: str) -> Path:
     return source
 
 
+def test_run_episode_installs_mini_agent_dir_before_replay(tmp_path: Path):
+    """guest 未预装 mini-swe-agent：mini_agent_dir 先上传再 pip install，且早于 replay。"""
+    image_map_path = _image_map(tmp_path, [{"benchmark": "swebench", "task_id": "t", "docker_image": "swebench/repo"}])
+    episode_dir = tmp_path / "run" / "episodes" / "ep-mini"
+    calls: list[str] = []
+
+    mini_src = tmp_path / "mini-src"
+    (mini_src / "minisweagent").mkdir(parents=True)
+    (mini_src / "minisweagent" / "__init__.py").write_text('__version__ = "0.0.0"\n')
+
+    def execute(command: str, timeout: float) -> subprocess.CompletedProcess:
+        calls.append(command)
+        if "export-events" in command:
+            (episode_dir / "shared" / "guest_events.jsonl").parent.mkdir(parents=True, exist_ok=True)
+            (episode_dir / "shared" / "guest_events.jsonl").write_text('{"kind":"session_snapshot","final":true}\n')
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    manifest = EpisodeManifest(
+        benchmark="swebench",
+        task_id="t",
+        source_episode="src",
+        episode_id="ep-mini",
+        source_store=str(_source_store(tmp_path, "ep-mini")),
+    )
+    record = run_episode(
+        manifest,
+        _vm_config(tmp_path),
+        tmp_path / "run",
+        image_map_path=image_map_path,
+        harbor=FakeHarbor({"swebench/repo": ["v1"]}, {"swebench/repo:v1": "sha256:abc"}),
+        exec_fn=execute,
+        vm_factory=lambda cfg, vid, keep: FakeVM(cfg),
+        mini_agent_dir=str(mini_src),
+    )
+
+    assert record["status"] == "completed", record
+    pip_index = [i for i, c in enumerate(calls) if "pip install" in c]
+    replay_index = [i for i, c in enumerate(calls) if "minisweagent.run.replay run" in c]
+    assert len(pip_index) == 1, calls
+    assert pip_index[0] < replay_index[0]
+    # ssh 后端：源码经 FakeVM 映射落到 episode 共享目录的对应 guest 路径
+    uploaded = episode_dir / "shared" / "opt" / "mini-swe-agent" / "minisweagent" / "__init__.py"
+    assert uploaded.is_file()
+
+
+def test_run_episode_invalid_mini_agent_dir_fails_with_clear_reason(tmp_path: Path):
+    """mini_agent_dir 不含 minisweagent 包时 episode 失败且原因清晰。"""
+    image_map_path = _image_map(tmp_path, [{"benchmark": "swebench", "task_id": "t", "docker_image": "swebench/repo"}])
+    not_mini = tmp_path / "not-mini"
+    not_mini.mkdir()
+
+    manifest = EpisodeManifest(
+        benchmark="swebench",
+        task_id="t",
+        source_episode="src",
+        episode_id="ep-bad-mini",
+        source_store=str(_source_store(tmp_path, "ep-bad-mini")),
+    )
+    record = run_episode(
+        manifest,
+        _vm_config(tmp_path),
+        tmp_path / "run",
+        image_map_path=image_map_path,
+        harbor=FakeHarbor({"swebench/repo": ["v1"]}, {"swebench/repo:v1": "sha256:abc"}),
+        exec_fn=lambda command, timeout: subprocess.CompletedProcess(command, 0, "", ""),
+        vm_factory=lambda cfg, vid, keep: FakeVM(cfg),
+        mini_agent_dir=str(not_mini),
+    )
+    assert record["status"] == "failed"
+    assert "mini_agent_dir" in record["failure"]
+
+
 def test_run_episode_completed_flow(tmp_path: Path):
     image_map_path = _image_map(tmp_path, [{"benchmark": "swebench", "task_id": "t", "docker_image": "swebench/repo"}])
     episode_dir = tmp_path / "run" / "episodes" / "ep-h2"
