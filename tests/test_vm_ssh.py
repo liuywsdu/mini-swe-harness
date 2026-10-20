@@ -132,6 +132,30 @@ def test_single_vm_accepts_baseline_factory_positional_args(tmp_path: Path):
     vm.destroy()
 
 
+def test_ssh_and_scp_never_consume_caller_stdin(tmp_path: Path, monkeypatch):
+    """无 input 的 ssh/scp 必须显式 stdin=DEVNULL。
+
+    ssh/scp 客户端会读并转发调用方 stdin；在 ``find | while read`` 批量脚本里
+    会吃掉循环剩余的输入行导致提前终止（真实事故）。
+    """
+    vm = SingleVM(_config(tmp_path), vm_id="stdin-null")
+    (tmp_path / "f.txt").write_text("x")
+    captured: list[dict] = []
+
+    def fake_run(command, **kwargs):
+        captured.append({"command": command, **kwargs})
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("minisweharness.vm.subprocess.run", fake_run)
+    vm.guest_exec("true")
+    vm.upload_file(tmp_path / "f.txt", "/root/f.txt")
+    vm.download_file("/root/f.txt", tmp_path / "g.txt")
+    assert captured, "ssh/scp 未被调用"
+    for call in captured:
+        assert call.get("stdin") is subprocess.DEVNULL, call["command"]
+        assert "input" not in call, call["command"]
+
+
 def test_docker_login_password_uses_stdin_not_command_line(tmp_path: Path):
     vm = SingleVM(_config(tmp_path), vm_id="docker-auth")
     captured = {}

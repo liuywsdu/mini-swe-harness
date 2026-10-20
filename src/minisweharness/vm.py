@@ -198,12 +198,17 @@ class SingleVM:
     ) -> subprocess.CompletedProcess[str]:
         """经 SSH 在 guest 内执行命令；超时按 SSH 连接超时处理。"""
         remote = _build_remote_command(command, "/root", {}, ["bash", "-lc"])
+        # 不传 input 时显式 DEVNULL：ssh 客户端会读并转发 stdin，在
+        # ``find | while read`` 之类的调用方循环里会吃掉剩余的输入行
+        run_kwargs = (
+            {"input": input_text} if input_text is not None else {"stdin": subprocess.DEVNULL}
+        )
         return subprocess.run(
             self._ssh_command(remote),
             text=True,
             capture_output=True,
             timeout=timeout or self.config.command_timeout_seconds,
-            input=input_text,
+            **run_kwargs,
         )
 
     def guest_check(self, command: str, timeout: float | None = None) -> str:
@@ -265,6 +270,7 @@ class SingleVM:
             command,
             text=True,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             timeout=timeout or self.config.command_timeout_seconds,
         )
         if result.returncode != 0:
@@ -332,6 +338,7 @@ class SingleVM:
                     self._ssh_command("true"),
                     text=True,
                     capture_output=True,
+                    stdin=subprocess.DEVNULL,
                     timeout=min(3, max(0.1, deadline - time.monotonic())),
                 )
                 if result.returncode == 0:
