@@ -9,10 +9,10 @@
 4. 镜像预热（warm-up 阶段）：guest 内 ``docker pull <Harbor 全路径>``
    （override 名即 Harbor 名，无需 tag）并 inspect 验证；
 5. episode 注入：源 store/override 经 SCP 上传，guest 内
-   ``python -m minisweagent.run.replay run --environment-config <override>``（mini 对
-   docker executor 强制 ``--pull=never``，命中本地 Harbor 名镜像）；guest 未预装
-   mini-swe-agent 时传 ``mini_agent_dir``（含 minisweagent 包的目录，即 mini 仓库的
-   ``src/``），先 SCP 上传再 guest 内 ``pip install``；
+   ``<python> -m minisweagent.run.replay run --environment-config <override>``（mini 对
+   docker executor 强制 ``--pull=never``，命中本地 Harbor 名镜像；解释器由
+   manifest 的 ``mini_executable`` 决定，默认 guest 内
+   ``/opt/mini-swe-agent/.venv/bin/python``）；
 6. 收尾校验：``session_snapshot.final`` 存在、导出 JSONL 行数与 store 一致；
 7. 落盘 §6 布局：episode.json / guest_events.jsonl / vm_samples.jsonl /
    vm_lifecycle.json / anchors.jsonl，run 根目录写 run_manifest.json（含
@@ -70,95 +70,45 @@ ExecFn = Callable[[str, float], subprocess.CompletedProcess]
 VMFactory = Callable[[VMConfig, str, bool], "SingleVM"]
 
 
-MINI_AGENT_GUEST_DIR = "/opt/mini-swe-agent"
+_MINI_PROBE_SCRIPT = (
+    "import importlib.util,sys,site;"
+    "spec = importlib.util.find_spec('minisweagent');"
+    "print('PY', sys.executable);"
+    "print('VERSION', sys.version.split()[0]);"
+    "print('SITEPKGS', *site.getsitepackages());"
+    "print('SPEC', spec.origin if spec else 'NOT_FOUND')"
+)
 
 
-def _resolve_mini_project_root(mini_agent_dir: Path) -> Path:
-    """定位 mini-swe-agent 项目根（含 ``pyproject.toml`` 与 ``src/minisweagent``）。
-
-    接受两种传法：仓库根本身，或直接指到 ``src/``（自动上溯到仓库根）。
-    """
-    candidate = Path(mini_agent_dir)
-    if (candidate / "pyproject.toml").is_file() and (candidate / "src" / "minisweagent" / "__init__.py").is_file():
-        return candidate
-    if (candidate / "minisweagent" / "__init__.py").is_file() and (candidate.parent / "pyproject.toml").is_file():
-        return candidate.parent
-    raise ValueError(
-        "mini_agent_dir 必须指向 mini-swe-agent 仓库根（含 pyproject.toml 与 "
-        f"src/minisweagent），或其在 src/ 下的包目录：{candidate}"
-    )
+def _python_cmd_from_mini_executable(mini_executable: str) -> str:
+    """从 manifest.mini_executable 提取解释器命令（``/path/.venv/bin/python -m ...`` → 前者）。"""
+    if " -m " in mini_executable:
+        return mini_executable.split(" -m ", 1)[0].strip() or "python3"
+    return "python3"
 
 
-def _stage_mini_project(root: Path, staging: Path) -> None:
-    """把 pip install 所需文件暂存到 staging（不含 .git/tests 等多余内容）。"""
-    if staging.exists():
-        shutil.rmtree(staging)
-    staging.mkdir(parents=True)
-    shutil.copy2(root / "pyproject.toml", staging / "pyproject.toml")
-    for extra in ("setup.py", "setup.cfg", "README.md", "README.rst", "LICENSE.md", "LICENSE"):
-        if (root / extra).is_file():
-            shutil.copy2(root / extra, staging / extra)
-    shutil.copytree(root / "src", staging / "src")
+def _probe_mini_agent_importable(execute, *, python_cmd: str) -> None:
+    """replay 前探针：replay 所用的解释器必须能 import minisweagent，否则给可操作的报错。
 
-
-def _install_mini_agent(vm, execute, mini_agent_dir, ssh_transfer, shared_dir, guest_share) -> None:
-    """把宿主机 mini-swe-agent 源码装进 guest（``pip install``，依赖经 guest 网络解析）。
-
-    供 guest 镜像未预装 mini-swe-agent 时使用；镜像已预装则不要传 ``mini_agent_dir``。
-    ``mini_agent_dir`` 传 mini-swe-agent 仓库根或其 ``src/`` 均可（自动识别）。
-    """
-    root = _resolve_mini_project_root(Path(mini_agent_dir))
-    staging = shared_dir / "mini-agent"
-    _stage_mini_project(root, staging)
-    if ssh_transfer:
-        vm.upload_directory(staging, MINI_AGENT_GUEST_DIR, timeout=300)
-        guest_src = MINI_AGENT_GUEST_DIR
-    else:
-        guest_src = f"{guest_share}/mini-agent"
-    install_command = (
-        f"python3 -m pip install --disable-pip-version-check --no-input {shlex.quote(guest_src)}"
-    )
-    logger.info("guest pip install mini-swe-agent: %s", install_command)
-    result = execute(install_command, 600)
-    if result.returncode != 0:
-        output = (result.stdout + result.stderr)[-2000:]
-        raise GuestStoreError(
-            f"pip install mini-swe-agent in guest failed ({result.returncode}): {output}; "
-            "guest 需有 pip 与 PyPI 网络，或将 mini-swe-agent 预装进 guest 镜像（不传 --mini-agent-dir）"
-        )
-
-
-def _probe_mini_agent_importable(execute, *, installed_via_flag: bool) -> None:
-    """replay 前探针：guest 当前 python3 必须能 import minisweagent，否则给可操作的报错。
-
-    区分两种常见原因：没传 ``--mini-agent-dir``（guest 镜像也没预装），或传了但 pip
-    装到了不同的 python 环境（guest 内多个解释器时 ``python3 -m`` 可见性不一致）。
+    agent 代码由镜像预装（如 ``/opt/mini-swe-agent/.venv``），harness 不上传 agent；
+    失败时同一次 SSH 往返内带回完整对账信息（解释器路径/版本/site-packages 列表/
+    ``pip show`` 结果）。
     """
     probe = execute(
-        "python3 -c "
-        + shlex.quote(
-            "import importlib.util;"
-            "spec = importlib.util.find_spec('minisweagent');"
-            "print('NOT_FOUND' if spec is None else 'OK ' + str(spec.origin))"
-        ),
-        30,
+        f"{shlex.quote(python_cmd)} -c "
+        + shlex.quote(_MINI_PROBE_SCRIPT)
+        + f"; {shlex.quote(python_cmd)} -m pip show mini-swe-agent 2>&1 | head -20",
+        60,
     )
     output = ((probe.stdout or "") + (probe.stderr or "")).strip()
-    if probe.returncode != 0 or "OK " not in output:
-        if installed_via_flag:
-            hint = (
-                "本次已通过 --mini-agent-dir 安装但 import 仍失败：pip 很可能装到了 guest 内"
-                "另一个 python 环境（用 python3 -m pip show mini-swe-agent 与 "
-                "python3 -c 'import sys; print(sys.executable)' 对账），或将 mini-swe-agent "
-                "预装进 guest 镜像"
-            )
-        else:
-            hint = (
-                "未传 --mini-agent-dir 且 guest 镜像未预装 mini-swe-agent；"
-                "请传 --mini-agent-dir <mini-swe-agent 仓库根或其 src/>，或将其预装进 guest 镜像"
-            )
-        raise GuestStoreError(f"minisweagent not importable in guest: {output[-500:]}; {hint}")
-    logger.info("guest minisweagent import probe: %s", output.splitlines()[0])
+    if probe.returncode != 0 or "SPEC NOT_FOUND" in output:
+        hint = (
+            "guest 内该解释器未能 import minisweagent；agent 由 guest rootfs 预装"
+            "（如 /opt/mini-swe-agent/.venv），请核对镜像内容，或用 --mini-executable "
+            "指向正确的解释器"
+        )
+        raise GuestStoreError(f"minisweagent not importable in guest:\n{output[-1500:]}\n{hint}")
+    logger.info("guest minisweagent import probe: %s", output.splitlines()[-1] if output else "OK")
 
 
 def build_replay_command(
@@ -201,7 +151,7 @@ def export_events_command(
     episode_id: str,
     output_guest_path: str,
     *,
-    mini_executable: str = "python3 -m minisweagent.run.replay",
+    mini_executable: str = "/opt/mini-swe-agent/.venv/bin/python -m minisweagent.run.replay",
 ) -> list[str]:
     return shlex.split(mini_executable) + [
         "export-events",
@@ -230,7 +180,6 @@ def run_episode(
     baseline_profile_id: str | None = None,
     thresholds: QualityThresholds | None = None,
     slot_index: int | None = None,
-    mini_agent_dir: str | Path | None = None,
 ) -> dict:
     """跑一个 episode；返回 episode.json 记录。异常时尽力落盘 status=failed。"""
     if bool(registry_username) != bool(registry_password):
@@ -368,11 +317,9 @@ def run_episode(
         if ssh_transfer:
             vm.upload_file(shared_dir / "override.json", override_guest)
 
-        # ---- 阶段 2b：mini-swe-agent 代码供给（guest 镜像未预装时）
-        if mini_agent_dir:
-            _install_mini_agent(vm, execute, mini_agent_dir, ssh_transfer, shared_dir, guest_share)
-        # replay 前置探针：guest 当前 python3 必须能 import minisweagent（窗口外，不计测量）
-        _probe_mini_agent_importable(execute, installed_via_flag=bool(mini_agent_dir))
+        # replay 前置探针：replay 所用的解释器必须能 import minisweagent（窗口外，不计测量）
+        python_cmd = _python_cmd_from_mini_executable(manifest.mini_executable)
+        _probe_mini_agent_importable(execute, python_cmd=python_cmd)
 
         # ---- 阶段 3：episode 测量窗口（replay）
         heartbeat_guest = f"{store_guest}/heartbeat.json"

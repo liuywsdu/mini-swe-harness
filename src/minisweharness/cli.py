@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import logging
 import os
@@ -77,8 +78,15 @@ def _cmd_sample(args: argparse.Namespace) -> int:
     return 0
 
 
+def _apply_mini_executable(manifests: list[EpisodeManifest], mini_executable: str) -> list[EpisodeManifest]:
+    """--mini-executable 覆盖 manifest 的 mini_executable（如 guest 内 venv python）。"""
+    if not mini_executable:
+        return manifests
+    return [dataclasses.replace(m, mini_executable=mini_executable) for m in manifests]
+
+
 def _cmd_run_episode(args: argparse.Namespace) -> int:
-    manifest = EpisodeManifest.from_json(args.manifest)
+    manifest = _apply_mini_executable([EpisodeManifest.from_json(args.manifest)], args.mini_executable)[0]
     vm_config = VMConfig.from_json(args.config)
     username, password = _registry_credentials_from_environment()
     record = run_episode(
@@ -91,7 +99,6 @@ def _cmd_run_episode(args: argparse.Namespace) -> int:
         registry_username=username,
         registry_password=password,
         keep_runtime_dir=args.keep_runtime_dir,
-        mini_agent_dir=args.mini_agent_dir or None,
     )
     print(json.dumps(record, indent=2, ensure_ascii=False))
     return 0 if record["status"] == "completed" else 1
@@ -122,7 +129,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
     manifest_paths = _manifest_paths(args)
     if not manifest_paths:
         raise ValueError("no manifests: pass --manifest <file...> and/or --manifest-dir <dir>")
-    episodes = [EpisodeManifest.from_json(path) for path in manifest_paths]
+    episodes = _apply_mini_executable(
+        [EpisodeManifest.from_json(path) for path in manifest_paths], args.mini_executable
+    )
     policy = GuardrailPolicy(
         max_concurrency=args.concurrency,
         host_available_memory_floor_gib=args.memory_floor,
@@ -161,7 +170,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
         registry_username=username,
         registry_password=password,
         keep_runtime_dir=args.keep_runtime_dir,
-        mini_agent_dir=args.mini_agent_dir or None,
     )
     for record in results:
         print(json.dumps(record, ensure_ascii=False))
@@ -271,9 +279,9 @@ def build_parser() -> argparse.ArgumentParser:
     episode.add_argument("--image-map", required=True, help="镜像映射表 JSONL（§5.4）")
     episode.add_argument("--keep-runtime-dir", action="store_true")
     episode.add_argument(
-        "--mini-agent-dir",
+        "--mini-executable",
         default="",
-        help="宿主机 mini-swe-agent 仓库根（或其 src/ 子目录，自动识别）；guest 未预装时上传并 pip install",
+        help="覆盖 manifest.mini_executable（如 guest 内 venv：/opt/mini-swe-agent/.venv/bin/python -m minisweagent.run.replay）",
     )
     episode.set_defaults(func=_cmd_run_episode)
 
@@ -317,9 +325,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--timeout", type=float, default=600.0, help="排队最长等待秒")
     run.add_argument("--keep-runtime-dir", action="store_true")
     run.add_argument(
-        "--mini-agent-dir",
+        "--mini-executable",
         default="",
-        help="宿主机 mini-swe-agent 仓库根（或其 src/ 子目录，自动识别）；guest 未预装时上传并 pip install",
+        help="覆盖全部 manifest 的 mini_executable（如 guest 内 venv：/opt/mini-swe-agent/.venv/bin/python -m minisweagent.run.replay）",
     )
     run.set_defaults(func=_cmd_run)
 

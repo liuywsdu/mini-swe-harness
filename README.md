@@ -107,7 +107,8 @@ mini-swe-harness run-episode \
     --run-dir runs/h2-001 \
     --registry harbor.internal \
     --image-map examples/image_map.jsonl \
-    --mini-agent-dir /path/to/mini-swe-agent   # guest 未预装 mini-swe-agent 时（仓库根或其 src/ 均可）
+    # agent 由 guest rootfs 预装（/opt/mini-swe-agent/.venv），默认 mini_executable 即其解释器；
+    # 非默认位置时用 --mini-executable 指向正确的 python -m minisweagent.run.replay
 ```
 
 流程要点（计划文档 §5.3 H2 / §5.4）：
@@ -126,12 +127,13 @@ mini-swe-harness run-episode \
 - **注入**：SSH 后端以 `scp -r` 上传源 store、以 `scp` 上传 override，guest 内跑
   `python -m minisweagent.run.replay run --environment-config <override>`（mini 对 docker
   executor 强制 `--pull=never`，命中本地 Harbor 名镜像）。
-- **mini-swe-agent 供给**：replay 在 guest 内执行，guest 必须能 import
-  `minisweagent`。两种供给方式（二选一）：把它**预装进 guest 镜像**（推荐，零
-  per-episode 开销）；或传 `--mini-agent-dir <mini 仓库根或其 src/>`（两种都认，
-  自动识别），harness 在注入阶段把 `pyproject.toml` + `src/` 暂存上传进 guest
-  并 `pip install`（依赖经 guest 网络解析，guest 需有 pip 与 PyPI 访问；失败给出
-  明确报错）。
+- **mini-swe-agent 供给**：replay 在 guest 内执行，agent 代码**只由 guest
+  rootfs 预装**（harness 不上传 agent；用户手动维护，如
+  `/opt/mini-swe-agent/.venv`）。manifest 的 `mini_executable` 决定调用方式，
+  默认 `/opt/mini-swe-agent/.venv/bin/python -m minisweagent.run.replay`
+  （`prepare` 生成的 manifest 同此默认）；装在其他位置时用 `--mini-executable`
+  覆盖。replay 前探针校验所选解释器能 import minisweagent，失败时报错附
+  `pip show`/解释器路径对账信息。
 - **完整性**：`session_snapshot.final` 存在才算 episode 有效；
   guest `export-events` 后通过 SCP 下载 store 与 `guest_events.jsonl`，导出
   产物行数必须与下载后的 store 行数一致。

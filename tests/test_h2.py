@@ -286,14 +286,15 @@ def test_replay_and_export_commands():
         environment_config_guest_path="/mnt/share/override.json",
     )
     joined = " ".join(command)
-    assert command[:4] == ["python3", "-m", "minisweagent.run.replay", "run"]
+    venv_python = "/opt/mini-swe-agent/.venv/bin/python"
+    assert command[:4] == [venv_python, "-m", "minisweagent.run.replay", "run"]
     assert "--store /mnt/share/store" in joined
     assert "--source src" in joined
     assert "--episode swebench--django__django-1--a0" in joined
     assert "--environment-config /mnt/share/override.json" in joined
     assert "--profile-digest digest123" in joined
     export = export_events_command("/mnt/share/store", "ep-1", "/mnt/share/guest_events.jsonl")
-    assert export[:4] == ["python3", "-m", "minisweagent.run.replay", "export-events"]
+    assert export[:4] == [venv_python, "-m", "minisweagent.run.replay", "export-events"]
     assert "--output /mnt/share/guest_events.jsonl" in " ".join(export)
 
 
@@ -385,74 +386,20 @@ def _source_store(tmp_path: Path, episode_id: str) -> Path:
     return source
 
 
-def _mini_repo(root: Path) -> Path:
-    """mini-swe-agent 仓库根：pyproject.toml + src/minisweagent（pip 可安装的最小布局）。"""
-    (root / "src" / "minisweagent").mkdir(parents=True)
-    (root / "src" / "minisweagent" / "__init__.py").write_text('__version__ = "0.0.0"\n')
-    (root / "pyproject.toml").write_text("[project]\nname = 'mini-swe-agent'\n")
-    (root / "README.md").write_text("mini")
-    return root
-
-
-def test_run_episode_installs_mini_agent_dir_before_replay(tmp_path: Path):
-    """guest 未预装 mini-swe-agent：mini_agent_dir 先上传再 pip install，且早于 replay。"""
+def test_run_episode_probe_uses_mini_executable_interpreter(tmp_path: Path):
+    """mini_executable 指向 guest venv python 时，探针与 pip install 都用同一解释器。"""
     image_map_path = _image_map(tmp_path, [{"benchmark": "swebench", "task_id": "t", "docker_image": "swebench/repo"}])
-    episode_dir = tmp_path / "run" / "episodes" / "ep-mini"
+    episode_dir = tmp_path / "run" / "episodes" / "ep-venv"
     calls: list[str] = []
-
-    mini_root = _mini_repo(tmp_path / "mini-repo")
+    venv_python = "/opt/mini-swe-agent/.venv/bin/python"
+    mini_executable = f"{venv_python} -m minisweagent.run.replay"
 
     def execute(command: str, timeout: float) -> subprocess.CompletedProcess:
-        if "find_spec" in command:
-            return subprocess.CompletedProcess(command, 0, "OK /usr/lib/python3/dist-packages/minisweagent/__init__.py\n", "")
         calls.append(command)
-        if "export-events" in command:
-            (episode_dir / "shared" / "guest_events.jsonl").parent.mkdir(parents=True, exist_ok=True)
-            (episode_dir / "shared" / "guest_events.jsonl").write_text('{"kind":"session_snapshot","final":true}\n')
-        return subprocess.CompletedProcess(command, 0, "", "")
-
-    manifest = EpisodeManifest(
-        benchmark="swebench",
-        task_id="t",
-        source_episode="src",
-        episode_id="ep-mini",
-        source_store=str(_source_store(tmp_path, "ep-mini")),
-    )
-    record = run_episode(
-        manifest,
-        _vm_config(tmp_path),
-        tmp_path / "run",
-        image_map_path=image_map_path,
-        harbor=FakeHarbor({"swebench/repo": ["v1"]}, {"swebench/repo:v1": "sha256:abc"}),
-        exec_fn=execute,
-        vm_factory=lambda cfg, vid, keep: FakeVM(cfg),
-        mini_agent_dir=str(mini_root),
-    )
-
-    assert record["status"] == "completed", record
-    pip_index = [i for i, c in enumerate(calls) if "pip install" in c]
-    replay_index = [i for i, c in enumerate(calls) if "minisweagent.run.replay run" in c]
-    assert len(pip_index) == 1, calls
-    assert pip_index[0] < replay_index[0]
-    # ssh 后端：暂存目录（pyproject.toml + src/，无 .git）经 FakeVM 映射落到 guest 对应路径
-    uploaded_pkg = episode_dir / "shared" / "opt" / "mini-swe-agent" / "src" / "minisweagent" / "__init__.py"
-    uploaded_pyproject = episode_dir / "shared" / "opt" / "mini-swe-agent" / "pyproject.toml"
-    assert uploaded_pkg.is_file()
-    assert uploaded_pyproject.is_file()
-
-
-def test_run_episode_mini_agent_dir_accepts_src_subdir(tmp_path: Path):
-    """--mini-agent-dir 直接指到 src/ 也能工作（自动上溯到仓库根）。"""
-    image_map_path = _image_map(tmp_path, [{"benchmark": "swebench", "task_id": "t", "docker_image": "swebench/repo"}])
-    mini_root = _mini_repo(tmp_path / "mini-repo")
-    calls: list[str] = []
-
-    def execute(command: str, timeout: float) -> subprocess.CompletedProcess:
         if "find_spec" in command:
-            return subprocess.CompletedProcess(command, 0, "OK /usr/lib/python3/dist-packages/minisweagent/__init__.py\n", "")
-        calls.append(command)
+            return subprocess.CompletedProcess(command, 0, f"SPEC {venv_python}/../src/minisweagent/__init__.py\n", "")
         if "export-events" in command:
-            events = tmp_path / "run" / "episodes" / "ep-mini-src" / "shared" / "guest_events.jsonl"
+            events = episode_dir / "shared" / "guest_events.jsonl"
             events.parent.mkdir(parents=True, exist_ok=True)
             events.write_text('{"kind":"session_snapshot","final":true}\n')
         return subprocess.CompletedProcess(command, 0, "", "")
@@ -461,8 +408,9 @@ def test_run_episode_mini_agent_dir_accepts_src_subdir(tmp_path: Path):
         benchmark="swebench",
         task_id="t",
         source_episode="src",
-        episode_id="ep-mini-src",
-        source_store=str(_source_store(tmp_path, "ep-mini-src")),
+        episode_id="ep-venv",
+        source_store=str(_source_store(tmp_path, "ep-venv")),
+        mini_executable=mini_executable,
     )
     record = run_episode(
         manifest,
@@ -472,10 +420,15 @@ def test_run_episode_mini_agent_dir_accepts_src_subdir(tmp_path: Path):
         harbor=FakeHarbor({"swebench/repo": ["v1"]}, {"swebench/repo:v1": "sha256:abc"}),
         exec_fn=execute,
         vm_factory=lambda cfg, vid, keep: FakeVM(cfg),
-        mini_agent_dir=str(mini_root / "src"),
     )
     assert record["status"] == "completed", record
-    assert any("pip install" in c and "/opt/mini-swe-agent" in c for c in calls)
+    probe_calls = [c for c in calls if "find_spec" in c]
+    assert len(probe_calls) == 1 and probe_calls[0].startswith(venv_python + " -c ")
+    # 无任何上传/安装调用：agent 由镜像预装，harness 只负责用同一解释器探针 + 调用
+    assert not any("pip install" in c or "scp" in c for c in calls)
+    # replay 命令本身也用 venv python
+    replay_calls = [c for c in calls if "minisweagent.run.replay run" in c]
+    assert replay_calls and replay_calls[0].startswith(venv_python + " -m ")
 
 
 def test_run_episode_probe_fails_when_mini_agent_not_importable(tmp_path: Path):
@@ -484,7 +437,14 @@ def test_run_episode_probe_fails_when_mini_agent_not_importable(tmp_path: Path):
 
     def execute(command: str, timeout: float) -> subprocess.CompletedProcess:
         if "find_spec" in command:
-            return subprocess.CompletedProcess(command, 0, "NOT_FOUND\n", "")
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                "PY /usr/bin/python3\nVERSION 3.10.12\n"
+                "SITEPKGS /usr/lib/python3/dist-packages\nSPEC NOT_FOUND\n"
+                "---\nWARNING: Package(s) not found: mini-swe-agent\n",
+                "",
+            )
         return subprocess.CompletedProcess(command, 0, "", "")
 
     manifest = EpisodeManifest(
@@ -505,41 +465,9 @@ def test_run_episode_probe_fails_when_mini_agent_not_importable(tmp_path: Path):
     )
     assert record["status"] == "failed"
     assert "minisweagent not importable in guest" in record["failure"]
-    assert "--mini-agent-dir" in record["failure"]
+    assert "--mini-executable" in record["failure"]
     # 探针在 replay 之前触发：replay 命令不应被执行
     assert "replay run --store" not in record.get("failure", "")
-
-
-def test_run_episode_invalid_mini_agent_dir_fails_with_clear_reason(tmp_path: Path):
-    """mini_agent_dir 不是 mini-swe-agent 仓库（根或 src/）时 episode 失败且原因清晰。"""
-    image_map_path = _image_map(tmp_path, [{"benchmark": "swebench", "task_id": "t", "docker_image": "swebench/repo"}])
-    not_mini = tmp_path / "not-mini"
-    not_mini.mkdir()
-
-    manifest = EpisodeManifest(
-        benchmark="swebench",
-        task_id="t",
-        source_episode="src",
-        episode_id="ep-bad-mini",
-        source_store=str(_source_store(tmp_path, "ep-bad-mini")),
-    )
-    record = run_episode(
-        manifest,
-        _vm_config(tmp_path),
-        tmp_path / "run",
-        image_map_path=image_map_path,
-        harbor=FakeHarbor({"swebench/repo": ["v1"]}, {"swebench/repo:v1": "sha256:abc"}),
-        exec_fn=lambda command, timeout: subprocess.CompletedProcess(
-            command,
-            0,
-            "OK /usr/lib/python3/dist-packages/minisweagent/__init__.py\n" if "find_spec" in command else "",
-            "",
-        ),
-        vm_factory=lambda cfg, vid, keep: FakeVM(cfg),
-        mini_agent_dir=str(not_mini),
-    )
-    assert record["status"] == "failed"
-    assert "mini_agent_dir" in record["failure"] or "pyproject.toml" in record["failure"]
 
 
 def test_run_episode_completed_flow(tmp_path: Path):

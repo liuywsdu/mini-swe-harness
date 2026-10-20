@@ -35,7 +35,8 @@ class EpisodeManifest:
     trajectory: str = ""
     """宿主机侧 trajectory JSON（用于提取 source_image 与 replay 环境信息）。"""
 
-    mini_executable: str = "python3 -m minisweagent.run.replay"
+    mini_executable: str = "/opt/mini-swe-agent/.venv/bin/python -m minisweagent.run.replay"
+    """guest 内执行 mini 的命令前缀；默认用 /opt/mini-swe-agent/.venv 的解释器（agent 由镜像预装）。"""
     episode_timeout_seconds: float = 3600.0
 
     extra_replay_args: list[str] = field(default_factory=list)

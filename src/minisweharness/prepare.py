@@ -41,7 +41,7 @@ from typing import Protocol
 from minisweharness.images import ImageMap
 from minisweharness.manifest import EpisodeManifest
 
-DEFAULT_MINI_EXECUTABLE = "python3 -m minisweagent.run.replay"
+DEFAULT_MINI_EXECUTABLE = "/opt/mini-swe-agent/.venv/bin/python -m minisweagent.run.replay"
 DEFAULT_EPISODE_TIMEOUT_SECONDS = 3600.0
 
 
