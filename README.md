@@ -107,7 +107,7 @@ mini-swe-harness run-episode \
     --run-dir runs/h2-001 \
     --registry harbor.internal \
     --image-map examples/image_map.jsonl \
-    --mini-agent-dir /path/to/mini-swe-agent/src   # guest 未预装 mini-swe-agent 时
+    --mini-agent-dir /path/to/mini-swe-agent   # guest 未预装 mini-swe-agent 时（仓库根或其 src/ 均可）
 ```
 
 流程要点（计划文档 §5.3 H2 / §5.4）：
@@ -128,9 +128,10 @@ mini-swe-harness run-episode \
   executor 强制 `--pull=never`，命中本地 Harbor 名镜像）。
 - **mini-swe-agent 供给**：replay 在 guest 内执行，guest 必须能 import
   `minisweagent`。两种供给方式（二选一）：把它**预装进 guest 镜像**（推荐，零
-  per-episode 开销）；或传 `--mini-agent-dir <mini 仓库的 src/>`，harness 在注入
-  阶段把该目录 scp 进 guest 并 `pip install`（依赖经 guest 网络解析，guest 需有
-  pip 与 PyPI 访问；失败给出明确报错）。
+  per-episode 开销）；或传 `--mini-agent-dir <mini 仓库根或其 src/>`（两种都认，
+  自动识别），harness 在注入阶段把 `pyproject.toml` + `src/` 暂存上传进 guest
+  并 `pip install`（依赖经 guest 网络解析，guest 需有 pip 与 PyPI 访问；失败给出
+  明确报错）。
 - **完整性**：`session_snapshot.final` 存在才算 episode 有效；
   guest `export-events` 后通过 SCP 下载 store 与 `guest_events.jsonl`，导出
   产物行数必须与下载后的 store 行数一致。

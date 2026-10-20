@@ -273,7 +273,7 @@ def build_parser() -> argparse.ArgumentParser:
     episode.add_argument(
         "--mini-agent-dir",
         default="",
-        help="宿主机 mini-swe-agent 源码目录（含 minisweagent 包，即其 src/）；guest 未预装时上传并 pip install",
+        help="宿主机 mini-swe-agent 仓库根（或其 src/ 子目录，自动识别）；guest 未预装时上传并 pip install",
     )
     episode.set_defaults(func=_cmd_run_episode)
 
@@ -319,7 +319,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--mini-agent-dir",
         default="",
-        help="宿主机 mini-swe-agent 源码目录（含 minisweagent 包，即其 src/）；guest 未预装时上传并 pip install",
+        help="宿主机 mini-swe-agent 仓库根（或其 src/ 子目录，自动识别）；guest 未预装时上传并 pip install",
     )
     run.set_defaults(func=_cmd_run)
 

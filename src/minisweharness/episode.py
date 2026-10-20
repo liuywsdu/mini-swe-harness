@@ -73,25 +73,47 @@ VMFactory = Callable[[VMConfig, str, bool], "SingleVM"]
 MINI_AGENT_GUEST_DIR = "/opt/mini-swe-agent"
 
 
+def _resolve_mini_project_root(mini_agent_dir: Path) -> Path:
+    """定位 mini-swe-agent 项目根（含 ``pyproject.toml`` 与 ``src/minisweagent``）。
+
+    接受两种传法：仓库根本身，或直接指到 ``src/``（自动上溯到仓库根）。
+    """
+    candidate = Path(mini_agent_dir)
+    if (candidate / "pyproject.toml").is_file() and (candidate / "src" / "minisweagent" / "__init__.py").is_file():
+        return candidate
+    if (candidate / "minisweagent" / "__init__.py").is_file() and (candidate.parent / "pyproject.toml").is_file():
+        return candidate.parent
+    raise ValueError(
+        "mini_agent_dir 必须指向 mini-swe-agent 仓库根（含 pyproject.toml 与 "
+        f"src/minisweagent），或其在 src/ 下的包目录：{candidate}"
+    )
+
+
+def _stage_mini_project(root: Path, staging: Path) -> None:
+    """把 pip install 所需文件暂存到 staging（不含 .git/tests 等多余内容）。"""
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+    shutil.copy2(root / "pyproject.toml", staging / "pyproject.toml")
+    for extra in ("setup.py", "setup.cfg", "README.md", "README.rst", "LICENSE.md", "LICENSE"):
+        if (root / extra).is_file():
+            shutil.copy2(root / extra, staging / extra)
+    shutil.copytree(root / "src", staging / "src")
+
+
 def _install_mini_agent(vm, execute, mini_agent_dir, ssh_transfer, shared_dir, guest_share) -> None:
     """把宿主机 mini-swe-agent 源码装进 guest（``pip install``，依赖经 guest 网络解析）。
 
     供 guest 镜像未预装 mini-swe-agent 时使用；镜像已预装则不要传 ``mini_agent_dir``。
-    ``mini_agent_dir`` 必须是含 ``minisweagent`` 包的目录（mini 仓库的 ``src/``）。
+    ``mini_agent_dir`` 传 mini-swe-agent 仓库根或其 ``src/`` 均可（自动识别）。
     """
-    source = Path(mini_agent_dir)
-    if not (source / "minisweagent" / "__init__.py").is_file():
-        raise ValueError(
-            f"mini_agent_dir 必须是包含 minisweagent 包的目录（mini-swe-agent 的 src/）：{source}"
-        )
+    root = _resolve_mini_project_root(Path(mini_agent_dir))
+    staging = shared_dir / "mini-agent"
+    _stage_mini_project(root, staging)
     if ssh_transfer:
-        vm.upload_directory(source, MINI_AGENT_GUEST_DIR, timeout=300)
+        vm.upload_directory(staging, MINI_AGENT_GUEST_DIR, timeout=300)
         guest_src = MINI_AGENT_GUEST_DIR
     else:
-        destination = shared_dir / "mini-agent"
-        if destination.exists():
-            shutil.rmtree(destination)
-        shutil.copytree(source, destination)
         guest_src = f"{guest_share}/mini-agent"
     result = execute(
         f"python3 -m pip install --disable-pip-version-check --no-input {shlex.quote(guest_src)}",
