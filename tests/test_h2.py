@@ -403,6 +403,8 @@ def test_run_episode_installs_mini_agent_dir_before_replay(tmp_path: Path):
     mini_root = _mini_repo(tmp_path / "mini-repo")
 
     def execute(command: str, timeout: float) -> subprocess.CompletedProcess:
+        if "find_spec" in command:
+            return subprocess.CompletedProcess(command, 0, "OK /usr/lib/python3/dist-packages/minisweagent/__init__.py\n", "")
         calls.append(command)
         if "export-events" in command:
             (episode_dir / "shared" / "guest_events.jsonl").parent.mkdir(parents=True, exist_ok=True)
@@ -446,6 +448,8 @@ def test_run_episode_mini_agent_dir_accepts_src_subdir(tmp_path: Path):
     calls: list[str] = []
 
     def execute(command: str, timeout: float) -> subprocess.CompletedProcess:
+        if "find_spec" in command:
+            return subprocess.CompletedProcess(command, 0, "OK /usr/lib/python3/dist-packages/minisweagent/__init__.py\n", "")
         calls.append(command)
         if "export-events" in command:
             events = tmp_path / "run" / "episodes" / "ep-mini-src" / "shared" / "guest_events.jsonl"
@@ -474,6 +478,38 @@ def test_run_episode_mini_agent_dir_accepts_src_subdir(tmp_path: Path):
     assert any("pip install" in c and "/opt/mini-swe-agent" in c for c in calls)
 
 
+def test_run_episode_probe_fails_when_mini_agent_not_importable(tmp_path: Path):
+    """replay 前 import 探针失败 → episode 失败且提示可操作的下一步（而非 ModuleNotFoundError）。"""
+    image_map_path = _image_map(tmp_path, [{"benchmark": "swebench", "task_id": "t", "docker_image": "swebench/repo"}])
+
+    def execute(command: str, timeout: float) -> subprocess.CompletedProcess:
+        if "find_spec" in command:
+            return subprocess.CompletedProcess(command, 0, "NOT_FOUND\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    manifest = EpisodeManifest(
+        benchmark="swebench",
+        task_id="t",
+        source_episode="src",
+        episode_id="ep-probe",
+        source_store=str(_source_store(tmp_path, "ep-probe")),
+    )
+    record = run_episode(
+        manifest,
+        _vm_config(tmp_path),
+        tmp_path / "run",
+        image_map_path=image_map_path,
+        harbor=FakeHarbor({"swebench/repo": ["v1"]}, {"swebench/repo:v1": "sha256:abc"}),
+        exec_fn=execute,
+        vm_factory=lambda cfg, vid, keep: FakeVM(cfg),
+    )
+    assert record["status"] == "failed"
+    assert "minisweagent not importable in guest" in record["failure"]
+    assert "--mini-agent-dir" in record["failure"]
+    # 探针在 replay 之前触发：replay 命令不应被执行
+    assert "replay run --store" not in record.get("failure", "")
+
+
 def test_run_episode_invalid_mini_agent_dir_fails_with_clear_reason(tmp_path: Path):
     """mini_agent_dir 不是 mini-swe-agent 仓库（根或 src/）时 episode 失败且原因清晰。"""
     image_map_path = _image_map(tmp_path, [{"benchmark": "swebench", "task_id": "t", "docker_image": "swebench/repo"}])
@@ -493,7 +529,12 @@ def test_run_episode_invalid_mini_agent_dir_fails_with_clear_reason(tmp_path: Pa
         tmp_path / "run",
         image_map_path=image_map_path,
         harbor=FakeHarbor({"swebench/repo": ["v1"]}, {"swebench/repo:v1": "sha256:abc"}),
-        exec_fn=lambda command, timeout: subprocess.CompletedProcess(command, 0, "", ""),
+        exec_fn=lambda command, timeout: subprocess.CompletedProcess(
+            command,
+            0,
+            "OK /usr/lib/python3/dist-packages/minisweagent/__init__.py\n" if "find_spec" in command else "",
+            "",
+        ),
         vm_factory=lambda cfg, vid, keep: FakeVM(cfg),
         mini_agent_dir=str(not_mini),
     )
@@ -507,6 +548,8 @@ def test_run_episode_completed_flow(tmp_path: Path):
     calls: list[str] = []
 
     def execute(command: str, timeout: float) -> subprocess.CompletedProcess:
+        if "find_spec" in command:
+            return subprocess.CompletedProcess(command, 0, "OK /usr/lib/python3/dist-packages/minisweagent/__init__.py\n", "")
         calls.append(command)
         if "export-events" in command:
             (episode_dir / "shared" / "guest_events.jsonl").parent.mkdir(parents=True, exist_ok=True)
@@ -571,6 +614,8 @@ def test_run_episode_private_registry_logs_in_and_out(tmp_path: Path):
     vms = []
 
     def execute(command: str, timeout: float) -> subprocess.CompletedProcess:
+        if "find_spec" in command:
+            return subprocess.CompletedProcess(command, 0, "OK /usr/lib/python3/dist-packages/minisweagent/__init__.py\n", "")
         calls.append(command)
         if "export-events" in command:
             (episode_dir / "shared" / "guest_events.jsonl").write_text(
@@ -638,6 +683,8 @@ def test_run_episode_failure_closes_anchor_window(tmp_path: Path):
     image_map_path = _image_map(tmp_path, [{"benchmark": "b", "task_id": "t", "docker_image": "b/repo"}])
 
     def execute(command: str, timeout: float) -> subprocess.CompletedProcess:
+        if "find_spec" in command:
+            return subprocess.CompletedProcess(command, 0, "OK /usr/lib/python3/dist-packages/minisweagent/__init__.py\n", "")
         if "minisweagent.run.replay run" in command:
             return subprocess.CompletedProcess(command, 1, "", "boom")
         return subprocess.CompletedProcess(command, 0, "", "")

@@ -313,6 +313,8 @@ def test_run_episode_writes_clock_sync_and_reconciliation(tmp_path: Path):
     episode_dir = tmp_path / "run" / "episodes" / "ep-h3"
 
     def execute(command: str, timeout: float) -> subprocess.CompletedProcess:
+        if "find_spec" in command:
+            return subprocess.CompletedProcess(command, 0, "OK /usr/lib/python3/dist-packages/minisweagent/__init__.py\n", "")
         if "minisweagent.run.replay run" in command:
             store = episode_dir / "shared" / "store"
             store.mkdir(parents=True, exist_ok=True)
