@@ -278,6 +278,22 @@ guardrail 口径沿用 `gpu_tasks/container.py` 的 POLICY 思路：内存/磁�
 2. 宿主机内存/磁盘触下限时排队或拒绝，无静默超载（结果含 `rejected` 与原因，
    排队超时也记录）。
 
+## collect：归档成功 trace（episode 结果 + manifest）
+
+批量 run 结束后，按 `run_manifest.json` 筛出成功（默认 `status == "completed"`）
+的 episode，把其结果目录与对应 manifest 归档到新目录（默认移动、可改复制），
+并写一份仅含成功 episode 的 `run_manifest.json` 过滤副本：
+
+```bash
+mini-swe-harness collect     --run-manifest batch-test/runs/batch-1/run_manifest.json     --dest batch-test/runs/batch-1-success
+# --manifest-dir 缺省按 <run_dir>/../../manifests 猜测（batch-test/runs/batch-1 → batch-test/manifests）
+# --copy 复制而非移动；--dry-run 只打印计划；--status 可多次自定义成功状态
+```
+
+归档布局（与 §6 run 目录同构）：`<dest>/episodes/<episode_id>/`、
+`<dest>/manifests/<name>.json`、`<dest>/run_manifest.json`。
+manifest 匹配优先解析文件内容（resolved episode_id），解析失败回退文件名 stem。
+
 ## prepare：批量准备（import + manifest + 覆盖校验）
 
 把 ``<traces-dir>/<benchmark>/<task_id>/`` 下的全部 `trajectory.json`（兼容

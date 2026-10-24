@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 from minisweharness.baseline import measure_baseline
+from minisweharness.collect import collect
 from minisweharness.config import VMConfig, derive_slot_config
 from minisweharness.episode import run_episode
 from minisweharness.guardrail import GuardrailPolicy
@@ -252,6 +253,20 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
     return 0
 
 
+
+def _cmd_collect(args: argparse.Namespace) -> int:
+    summary = collect(
+        args.run_manifest,
+        args.dest,
+        manifest_dir=args.manifest_dir,
+        status=args.status,
+        move=not args.copy,
+        dry_run=args.dry_run,
+    )
+    print(json.dumps(summary.to_dict(), indent=2, ensure_ascii=False))
+    return 0 if not summary.missing_episode_dirs else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mini-swe-harness", description=__doc__)
     parser.add_argument("-v", "--verbose", action="store_true", help="debug 日志")
@@ -331,6 +346,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="覆盖全部 manifest 的 mini_executable（如 guest 内 venv：/opt/mini-swe-agent/.venv/bin/python -m minisweagent.run.replay）",
     )
     run.set_defaults(func=_cmd_run)
+
+    collect_cmd = subcommands.add_parser(
+        "collect",
+        help="按 run_manifest 筛选成功 episode，归档其结果目录与 manifest（默认移动）",
+    )
+    collect_cmd.add_argument("--run-manifest", required=True, help="<run-dir>/run_manifest.json 路径")
+    collect_cmd.add_argument("--dest", required=True, help="归档目标目录（自动创建）")
+    collect_cmd.add_argument(
+        "--manifest-dir",
+        default="",
+        help="episode manifest 目录；缺省按 <run_dir>/../../manifests 猜测",
+    )
+    collect_cmd.add_argument(
+        "--status",
+        action="append",
+        default=None,
+        help="视为成功的状态（可多次，默认仅 completed）",
+    )
+    collect_cmd.add_argument("--copy", action="store_true", help="复制而非移动")
+    collect_cmd.add_argument("--dry-run", action="store_true", help="只打印计划不改动文件")
+    collect_cmd.set_defaults(func=_cmd_collect)
 
     make_configs = subcommands.add_parser(
         "make-configs", help="按并发槽位展开 VM 配置（网络三元组互不冲突）并打印宿主机 tap/bridge 命令"
