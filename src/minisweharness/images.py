@@ -6,8 +6,10 @@
    ``docker_image`` 为 ``bench/task`` 形式的相对仓库路径，**无 tag、无
    registry 前缀**；查询键 ``(benchmark, task_id)`` 先精确匹配，未命中再回退
    同 benchmark 下 ``task_id`` 为空的通配条目（每 benchmark 至多一条）。
-2. Harbor API 解析：列 tag —— 唯一则用之；多个 → episode 标
-   ``skipped: ambiguous_tags``；零 tag（镜像不存在）视为映射表缺失，起跑前报错。
+2. Harbor API 解析：列 tag —— 唯一则用之；多个先按偏好前缀消歧
+   （默认 ``full-*``，如 dataagentbench 的 base/runtime/full 固定选 full），
+   仍不唯一 → episode 标 ``skipped: ambiguous_tags``；零 tag（镜像不存在）
+   视为映射表缺失，起跑前报错。
 3. digest 固定：tag 解析后查 Harbor API 固化 digest（``:local`` 等可变标签
    必须记 digest 保证 baseline 可复现）。
 4. 生成 override：``image`` 直写 Harbor 全路径（``registry/docker_image:tag``
@@ -200,20 +202,33 @@ class HarborClient:
 # ------------------------------------------------------------------ 解析
 
 
+# 多 tag 时的固定偏好前缀：按序过滤，某一前缀恰好命中一个 tag 即固定选用。
+# 解决 dataagentbench 等 ``base-*``/``runtime-*``/``full-*`` 三 tag 镜像的
+# 批量 ``ambiguous_tags`` 跳过（计划文档 §5.4：固定选 ``full-*``）。
+PREFERRED_TAG_PREFIXES: tuple[str, ...] = ("full-",)
+
+
 def resolve_image(
     entry: ImageEntry,
     *,
     registry: str,
     harbor: HarborAPI,
     source_image: str = "",
+    preferred_prefixes: tuple[str, ...] = PREFERRED_TAG_PREFIXES,
 ) -> ImageResolution | ImageSkipped:
-    """映射表条目 → Harbor 解析；唯一 tag 解析成功，多 tag 跳过，零 tag 报错。"""
+    """映射表条目 → Harbor 解析；零 tag 报错，多 tag 按偏好前缀消歧，仍不唯一才跳过。"""
     tags = harbor.list_tags(entry.docker_image)
     if not tags:
         raise MappingError(
             f"image_map entry has no tags in Harbor: {entry.benchmark}/{entry.task_id} "
             f"-> {entry.docker_image}"
         )
+    if len(tags) > 1:
+        for prefix in preferred_prefixes:
+            matches = [tag for tag in tags if tag.startswith(prefix)]
+            if len(matches) == 1:
+                tags = matches
+                break
     if len(tags) > 1:
         return ImageSkipped("ambiguous_tags", docker_image=entry.docker_image, tags=tuple(tags))
     tag = tags[0]

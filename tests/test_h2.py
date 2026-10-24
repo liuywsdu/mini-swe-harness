@@ -151,6 +151,45 @@ def test_resolve_image_ambiguous_skips(tmp_path: Path):
     assert result.tags == ("v1", "v2")
 
 
+def test_resolve_image_prefers_full_prefix(tmp_path: Path):
+    """dataagentbench 式 base-*/runtime-*/full-*：固定选 full-*。"""
+    entry = ImageMap.from_jsonl(
+        _image_map(tmp_path, [{"benchmark": "dataagentbench", "task_id": "t", "docker_image": "b/repo"}])
+    ).lookup("dataagentbench", "t")
+    harbor = FakeHarbor(
+        {"b/repo": ["base-6ad9d689", "runtime-6ad9d689", "full-6ad9d689"]},
+        {"b/repo:full-6ad9d689": "sha256:full"},
+    )
+    resolution = resolve_image(entry, registry=DEFAULT_REGISTRY, harbor=harbor)
+    assert not isinstance(resolution, ImageSkipped)
+    assert resolution.tag == "full-6ad9d689"
+    assert resolution.image == f"{DEFAULT_REGISTRY}/b/repo:full-6ad9d689"
+    assert resolution.digest == "sha256:full"
+
+
+def test_resolve_image_multiple_full_prefix_still_ambiguous(tmp_path: Path):
+    """多个 full-* tag 无法消歧，仍跳过。"""
+    entry = ImageMap.from_jsonl(
+        _image_map(tmp_path, [{"benchmark": "b", "task_id": "t", "docker_image": "b/repo"}])
+    ).lookup("b", "t")
+    harbor = FakeHarbor({"b/repo": ["full-a", "full-b", "base-c"]})
+    result = resolve_image(entry, registry=DEFAULT_REGISTRY, harbor=harbor)
+    assert isinstance(result, ImageSkipped)
+    assert result.reason == "ambiguous_tags"
+    assert result.tags == ("full-a", "full-b", "base-c")
+
+
+def test_resolve_image_prefix_disabled_keeps_ambiguous(tmp_path: Path):
+    """显式传入空偏好前缀时退化为原行为：多 tag 即跳过。"""
+    entry = ImageMap.from_jsonl(
+        _image_map(tmp_path, [{"benchmark": "b", "task_id": "t", "docker_image": "b/repo"}])
+    ).lookup("b", "t")
+    harbor = FakeHarbor({"b/repo": ["base-x", "full-x"]})
+    result = resolve_image(entry, registry=DEFAULT_REGISTRY, harbor=harbor, preferred_prefixes=())
+    assert isinstance(result, ImageSkipped)
+    assert result.reason == "ambiguous_tags"
+
+
 def test_resolve_image_zero_tags_errors(tmp_path: Path):
     entry = ImageMap.from_jsonl(
         _image_map(tmp_path, [{"benchmark": "b", "task_id": "t", "docker_image": "b/repo"}])
